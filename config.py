@@ -1,39 +1,36 @@
-# ================================================================
-# НАСТРОЙКИ - РЕГУЛИРУЙТЕ ВСЁ ЗДЕСЬ
-# ================================================================
+import os
 
-# Список URL для получения RAW ссылок прокси
+# ==============================================================================
+# КОНФИГУРАЦИЯ
+# ==============================================================================
+# Список ссылок на подписки (можно через запятую в кавычках)
 SUBSCRIPTION_URLS = [
-    "https://raw.githubusercontent.com/ceergo/parss/refs/heads/main/my_stable_configs.txt",
+    "https://raw.githubusercontent.com/ceergo/parss/refs/heads/main/my_stable_configs.txt"
 ]
 
-# Целевые URL для проверки (ищем маркер в теле ответа)
-CHECK_TARGETS = [
-    {
-        "url": "https://gemini.google.com/app?hl=ru",
-        "marker": "app"
-    }
-]
+# Ссылка для проверки доступности домена
+CHECK_URL = "https://gemini.google.com/app?hl=ru"
 
-# Лимиты
-MIN_SPEED_MBPS = 0.5  # Для working.txt
-MIN_SPEED_FAST = 0.2  # Для fast.txt
-CONNECT_TIMEOUT = 10  # Ожидание ответа порта xray
-MAX_WORKERS = 6       # Потоки (GitHub выдерживает до 10-15)
+# Отличительная черта для разделения файлов (ищем это слово в контенте страницы)
+DISTINCTIVE_FEATURE = "app"
 
-# Xray Настройки
-XRAY_PORT_RANGE = (12000, 18000)
-TLS_FINGERPRINTS = ["chrome", "firefox", "safari", "edge", "qq", "360", "android", "ios"]
+# Файлы подписок
+RAW_SUBSCRIPTION_FILE = "subscription_raw.txt"   # Основной источник (всегда чистится)
+OUR_SUBSCRIPTION = "our_subscription.txt"       # Наша копия для обработки
+WORKING_APP = "working_app.txt"                  # Результат: есть "app" + скорость
+WORKING_FAST = "working_fast.txt"                # Результат: нет "app", но быстрый ответ + скорость
 
-# Пути к файлам
-RAW_PATH = "subscriptions/raw.txt"
-WORKING_PATH = "subscriptions/working.txt"
-FAST_PATH = "subscriptions/fast.txt"
-TEMP_SETUP_PATH = "temp_setup.txt"
-LOG_PATH = "checker.log"
-RUN_COUNT_PATH = ".run_count"
+# Параметры проверки
+MAX_WORKERS = 10                                 # Количество потоков
+SPEED_TEST_MB = 1                                # Сколько мегабайт скачивать для теста
+MIN_SPEED_MBPS = 0.5                             # Минимальная скорость для WORKING_FAST (Mbps)
+UTLS_FINGERPRINTS = ["chrome", "firefox", "safari", "edge", "randomized"]
+CONNECT_TIMEOUT = 10                             # Таймаут подключения (сек)
+DOWNLOAD_TIMEOUT = 30                            # Таймаут замера скорости (сек)
 
-# Настройка замера скорости через librespeed-cli
-USE_LIBRESPEED = True
-LIBRESPEED_ARGS = "--json --bytes --no-upload --no-telemetry"
+# Пути к бинарникам
+XRAY_PATH = "./xray"
+LIBRESPEED_PATH = "./librespeed-cli"
 
+# Протоколы, которые мы ищем (поиск нечувствителен к регистру)
+PROTOCOLS = ["vless", "vmess", "trojan", "shadowsocks", "ss", "hysteria2", "tuic"]
