@@ -21,7 +21,7 @@ def download_binaries():
     import platform
     print(f"🖥️  [LOG] Проверка платформы: {platform.system()} {platform.machine()}")
     
-    # Определяем реальный путь к Xray
+    # Автоматическое определение пути к Xray
     actual_xray_path = XRAY_PATH
     if XRAY_PATH == "./xray" and not os.path.exists("./xray"):
         if os.path.exists("/usr/local/bin/xray"):
@@ -38,9 +38,9 @@ def download_binaries():
                 os.chmod(path, 0o755)
                 print(f"✅ [LOG] {name} найден: {path}")
             except Exception as e:
-                print(f"⚠️  [WARNING] Права {name}: {e}")
+                print(f"⚠️  [WARNING] Не удалось изменить права для {name}: {e}")
         else:
-            print(f"❌ [ERROR] {name} НЕ НАЙДЕН: {path}")
+            print(f"❌ [ERROR] {name} НЕ НАЙДЕН по пути: {path}")
 
 class ProxyChecker:
     def __init__(self, link):
@@ -48,8 +48,9 @@ class ProxyChecker:
         self.port = get_free_port()
         self.process: subprocess.Popen | None = None
         self.fingerprint = "chrome"
+        self.fail_reason = ""
         
-        # Определяем актуальный путь к бинарнику динамически
+        # Динамический выбор бинарника
         self.xray_bin = XRAY_PATH
         if self.xray_bin == "./xray" and not os.path.exists("./xray"):
             if os.path.exists("/usr/local/bin/xray"):
@@ -68,7 +69,7 @@ class ProxyChecker:
             return None
 
     def generate_xray_config(self):
-        """Генерирует JSON конфиг для Xray."""
+        """Генерирует JSON конфиг для Xray без вывода логов."""
         try:
             config = {
                 "log": {"loglevel": "none"},
@@ -159,13 +160,14 @@ class ProxyChecker:
             config["outbounds"] = [outbound, {"protocol": "freedom", "tag": "direct"}]
             return config
         except Exception as e:
-            print(f"⚠️  [DEBUG] Ошибка генерации: {e}")
+            self.fail_reason = f"Config Error: {e}"
             return None
 
     def start_xray(self):
+        """Запуск Xray (молча)."""
         config = self.generate_xray_config()
         if not config:
-            print(f"❌ [FAIL] {self.link[:40]}... | Ошибка: Не удалось распарсить ссылку")
+            if not self.fail_reason: self.fail_reason = "Parse failed"
             return False
             
         config_path = f"config_{self.port}.json"
@@ -177,14 +179,15 @@ class ProxyChecker:
                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             time.sleep(1.5)
             if self.process.poll() is not None:
-                print(f"❌ [FAIL] {self.link[:40]}... | Ошибка: Xray не запустился (Crash)")
+                self.fail_reason = "Xray instant crash"
                 return False
             return True
         except Exception as e:
-            print(f"❌ [ERROR] {self.link[:40]}... | Критическая ошибка Xray: {e}")
+            self.fail_reason = f"Exec error: {e}"
             return False
 
     def stop_xray(self):
+        """Остановка Xray (молча)."""
         if self.process:
             try:
                 self.process.terminate()
@@ -198,6 +201,7 @@ class ProxyChecker:
             except: pass
 
     def check_availability(self):
+        """Проверка доступности (молча)."""
         proxies = {'http': f'socks5h://127.0.0.1:{self.port}', 'https': f'socks5h://127.0.0.1:{self.port}'}
         try:
             start_time = time.time()
@@ -207,21 +211,19 @@ class ProxyChecker:
             if resp.status_code == 200:
                 has_feature = DISTINCTIVE_FEATURE.lower() in resp.text.lower()
                 if not has_feature:
-                    print(f"⚠️  [WARN] {self.link[:40]}... | Доступен, но '{DISTINCTIVE_FEATURE}' не найден")
+                    self.fail_reason = f"Keyword '{DISTINCTIVE_FEATURE}' missing"
                 return True, has_feature, duration
             else:
-                print(f"❌ [FAIL] {self.link[:40]}... | HTTP Status: {resp.status_code}")
+                self.fail_reason = f"HTTP {resp.status_code}"
         except requests.exceptions.Timeout:
-            print(f"🕒 [TIME] {self.link[:40]}... | Timeout ({CONNECT_TIMEOUT}s)")
+            self.fail_reason = "Connection Timeout"
         except Exception as e:
-            # Не выводим полный трейсбек, только короткую ошибку
-            err_msg = str(e).split(')')[-1].strip() or "Connection error"
-            print(f"❌ [FAIL] {self.link[:40]}... | {err_msg}")
+            self.fail_reason = f"Network: {str(e).split(')')[-1].strip() or 'No Route'}"
             
         return False, False, 0
 
     def check_speed(self):
-        print(f"🚀 [SPEED] {self.link[:40]}... | Запуск замера скорости...")
+        """Замер скорости (молча)."""
         cmd = [LIBRESPEED_PATH, "--proxy", f"socks5://127.0.0.1:{self.port}", "--json"]
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=DOWNLOAD_TIMEOUT)
@@ -229,12 +231,12 @@ class ProxyChecker:
                 data = json.loads(result.stdout)
                 download_mbps = data.get("download", 0) / 125000
                 if download_mbps < MIN_SPEED_MBPS:
-                    print(f"🐌 [SLOW] {self.link[:40]}... | Скорость {download_mbps:.2f} Mbps ниже лимита {MIN_SPEED_MBPS}")
+                    self.fail_reason = f"Low Speed: {download_mbps:.2f} Mbps"
                 return download_mbps
             else:
-                print(f"❌ [FAIL] {self.link[:40]}... | Librespeed вернул ошибку")
+                self.fail_reason = "Librespeed CLI error"
         except subprocess.TimeoutExpired:
-            print(f"🕒 [TIME] {self.link[:40]}... | Замер скорости прерван по таймауту")
+            self.fail_reason = "Speedtest Timeout"
         except Exception as e:
-            print(f"❌ [ERROR] {self.link[:40]}... | Ошибка замера: {e}")
+            self.fail_reason = f"Speedtest exception: {e}"
         return 0
