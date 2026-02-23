@@ -244,16 +244,17 @@ class ProxyChecker:
             json.dump(config, f)
             
         try:
+            xray_bin = os.getenv("XRAY_PATH", XRAY_PATH)
             # Используем shell=True только если xray не в PATH
             self.process = subprocess.Popen(
-                [XRAY_PATH, "-c", config_path],
+                [xray_bin, "-c", config_path],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
             time.sleep(1.5) # Ждем инициализации
             return True
         except Exception as e:
-            print(f"[ERROR] Не удалось запустить Xray: {e}")
+            print(f"[ERROR] Не удалось запустить Xray ({xray_bin}): {e}")
             return False
     def stop_xray(self):
         """Остановка и удаление мусора"""
