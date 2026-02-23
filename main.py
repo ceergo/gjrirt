@@ -46,6 +46,7 @@ def main():
     print(f"[LOG] Бот запущен: {datetime.now()}")
     
     # 1. Инициализация окружения (фикс прав доступа и путей)
+    # ПРИМЕЧАНИЕ: Убедитесь, что в config.py XRAY_PATH = "/usr/local/bin/xray"
     download_binaries()
     
     # 2. Сбор ссылок из всех источников
