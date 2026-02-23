@@ -1,0 +1,6 @@
+requests
+aiohttp
+aiofiles
+pysocks
+jsonpath-ng
+pyyaml
