@@ -40,7 +40,7 @@ UTLS_FINGERPRINTS = ["chrome", "firefox", "safari", "edge", "randomized"]
 CONNECT_TIMEOUT = 10                             # Таймаут подключения (сек)
 DOWNLOAD_TIMEOUT = 30                            # Таймаут замера скорости (сек)
 
-# Дефолтные пути к бинарникам (теперь они гибкие)
+# Дефолтные пути к бинарникам
 DEFAULT_XRAY_PATH = "./xray"
 DEFAULT_LIBRESPEED_PATH = "./librespeed-cli"
 
@@ -142,18 +142,26 @@ def get_free_port():
 
 def setup_binaries():
     """
-    Проверяет наличие бинарников по путям и устанавливает права.
+    Проверяет наличие бинарников по путям.
+    Не пытается менять права для системных путей (уже установлены инсталлятором).
     """
     xray_path, librespeed_path = get_actual_paths()
     print(f"[LOG] Проверка платформы: {platform.system()} {platform.machine()}")
     
     # Проверка Xray
     if os.path.exists(xray_path):
-        try:
-            os.chmod(xray_path, 0o755)
-            print(f"[LOG] Использование Xray по пути: {xray_path}")
-        except Exception as e:
-            print(f"[ERROR] Не удалось установить права для {xray_path}: {e}")
+        if os.access(xray_path, os.X_OK):
+            print(f"[LOG] Xray готов к работе: {xray_path}")
+        else:
+            # Если не в системной папке, пробуем дать права
+            if not xray_path.startswith("/usr/local/bin"):
+                try:
+                    os.chmod(xray_path, 0o755)
+                    print(f"[LOG] Установлены права для локального Xray: {xray_path}")
+                except Exception as e:
+                    print(f"[ERROR] Не удалось установить права для {xray_path}: {e}")
+            else:
+                print(f"[WARNING] Xray в системной папке не имеет прав на выполнение.")
     else:
         print(f"[WARNING] Xray не найден по пути: {xray_path}")
         
@@ -163,7 +171,11 @@ def setup_binaries():
             os.chmod(librespeed_path, 0o755)
             print(f"[LOG] Использование Librespeed по пути: {librespeed_path}")
         except Exception as e:
-            print(f"[ERROR] Не удалось установить права для {librespeed_path}: {e}")
+            # Если это системный путь и chmod не прошел, просто проверяем доступ
+            if os.access(librespeed_path, os.X_OK):
+                print(f"[LOG] Librespeed (системный) готов: {librespeed_path}")
+            else:
+                print(f"[ERROR] Не удалось установить права для Librespeed: {e}")
     else:
         print(f"[WARNING] Librespeed не найден по пути: {librespeed_path}")
 
@@ -388,7 +400,6 @@ def process_single_link(link):
             if speed > 0:
                 status = "working_app" if has_app else "working_fast"
                 category_name = "APP" if has_app else "FAST"
-                filename = WORKING_APP if has_app else WORKING_FAST
                 print(f"[LIVE] {link[:40]}... | {category_name} | Ping: {latency*1000:.0f}ms | Speed: {speed:.2f} Mbps")
                 return {"link": link, "status": status}
             else:
