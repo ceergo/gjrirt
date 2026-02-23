@@ -5,7 +5,12 @@ import subprocess
 import time
 import requests
 import concurrent.futures
+import socket
+import base64
+import platform
+import random
 from datetime import datetime
+from urllib.parse import urlparse, parse_qs, unquote
 # ==============================================================================
 # КОНФИГУРАЦИЯ (Редактируйте здесь)
 # ==============================================================================
@@ -85,7 +90,12 @@ def parse_subscriptions(content: str) -> list[str]:
         if starts:
             for i in range(len(starts)):
                 s_idx = starts[i]
-                e_idx = starts[i+1] if i + 1 < len(starts) else len(text)
+                # Гарантируем, что e_idx всегда определен
+                if i + 1 < len(starts):
+                    e_idx = starts[i+1]
+                else:
+                    e_idx = len(text)
+                
                 chunk = text[s_idx:e_idx].strip()
                 cleaned = clean_link(chunk)
                 if cleaned:
@@ -118,10 +128,7 @@ def parse_subscriptions(content: str) -> list[str]:
         process_text(c)
     final_links = sorted(list(set(filter(None, found_links))))
     return final_links
-import socket
-import json
-import base64
-from urllib.parse import urlparse, parse_qs, unquote
+# Импорты перенесены в начало файла
 def get_free_port():
     """Находит свободный порт в системе."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -234,19 +241,45 @@ class ProxyChecker:
                 }
             # Shadowsocks
             elif "ss://" in link_lower:
-                parsed = urlparse(self.link)
                 # ss://method:password@host:port#name
-                user_pass = parsed.netloc.split("@")[0]
-                if ":" in user_pass:
-                    method, password = user_pass.split(":")
+                # Могут быть ссылки ss://BASE64(method:password@host:port)
+                # или ss://BASE64(method:password)@host:port
+                parsed = urlparse(self.link)
+                user_info = parsed.username or ""
+                
+                if "@" not in self.link.split("://")[-1] or (not user_info and ":" not in parsed.netloc):
+                    # Похоже на полный Base64 ss://BASE64
+                    try:
+                        b64_part = self.link.split("://")[-1].split("#")[0]
+                        decoded_full = base64.b64decode(b64_part + "==").decode('utf-8', errors='ignore')
+                        if "@" in decoded_full:
+                            # Теперь это method:password@host:port
+                            user_pass_part, host_port_part = decoded_full.split("@", 1)
+                            method, password = user_pass_part.split(":", 1)
+                            if ":" in host_port_part:
+                                host, port = host_port_part.split(":", 1)
+                                port = int(port.split("/")[0])
+                            else:
+                                host, port = host_port_part, 8388
+                        else:
+                            return None
+                    except: return None
                 else:
-                    # Могло быть Base64
-                    decoded = base64.b64decode(user_pass + "==").decode('utf-8')
-                    method, password = decoded.split(":")
+                    # Стандартный формат или b64-userinfo
+                    user_pass = (parsed.netloc.split("@")[0])
+                    try:
+                        if ":" in user_pass:
+                            method, password = user_pass.split(":", 1)
+                        else:
+                            decoded = base64.b64decode(user_pass + "==").decode('utf-8', errors='ignore')
+                            method, password = decoded.split(":", 1)
+                        host = parsed.hostname
+                        port = parsed.port or 8388
+                    except: return None
                 
                 outbound = {
                     "protocol": "shadowsocks",
-                    "settings": {"servers": [{"address": parsed.hostname, "port": parsed.port, 
+                    "settings": {"servers": [{"address": host, "port": int(port), 
                                              "method": method, "password": password}]}
                 }
             
@@ -374,12 +407,12 @@ def process_single_link(link):
                 status = "working_app" if has_app else "working_fast"
                 category_name = "APP" if has_app else "FAST"
                 filename = WORKING_APP if has_app else WORKING_FAST
-                print(f"[LIVE] {link[:20]}... | {category_name} | Ping: {latency*1000:.0f}ms ({latency:.2f}s) | Speed: {speed:.2f} Mbps -> {filename}")
+                print(f"[LIVE] {link} | {category_name} | Ping: {latency*1000:.0f}ms ({latency:.2f}s) | Speed: {speed:.2f} Mbps -> {filename}")
                 return {"link": link, "status": status}
             else:
-                print(f"[LIVE] {link[:20]}... | Низкая скорость или ошибка замера | Ping: {latency*1000:.0f}ms")
+                print(f"[LIVE] {link} | Низкая скорость или ошибка замера | Ping: {latency*1000:.0f}ms")
         else:
-            print(f"[LIVE] {link[:20]}... | Недоступен (Dead) | {link[:30]}")
+            print(f"[LIVE] {link} | Недоступен (Dead)")
         
         return {"link": link, "status": "dead"}
     except Exception as e:
