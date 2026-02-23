@@ -12,14 +12,23 @@ from urllib.parse import urlparse, parse_qs, unquote
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import requests
-import config
+
+# Безопасный импорт конфига
+try:
+    import config
+except ImportError:
+    print("Error: config.py not found!")
+    sys.exit(1)
+
+# Функция для безопасного получения настроек из config
+def get_cfg(attr, default=None):
+    return getattr(config, attr, default)
 
 # ================================================================
 # IDENTITY & EXTRACTION
 # ================================================================
 
 def extract_server_identity(node_string):
-    """Извлечение хоста и порта для предотвращения дублей."""
     try:
         url_part = node_string.split('#')[0]
         parsed = urlparse(url_part)
@@ -32,7 +41,6 @@ def extract_server_identity(node_string):
     return node_string
 
 def industrial_extractor(source_text):
-    """Промышленный экстрактор с рекурсией Base64 (User original + fixes)."""
     patterns = {
         'vless': r'vless://[^\s]+',
         'vmess': r'vmess://[^\s]+',
@@ -68,19 +76,19 @@ def industrial_extractor(source_text):
 class XrayWrapper:
     @staticmethod
     def get_free_port():
+        port_range = get_cfg('XRAY_PORT_RANGE', (10000, 20000))
         for _ in range(50):
-            port = random.randint(config.XRAY_PORT_RANGE[0], config.XRAY_PORT_RANGE[1])
+            port = random.randint(port_range[0], port_range[1])
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 if s.connect_ex(('127.0.0.1', port)) != 0: return port
         return None
 
     @staticmethod
     def parse_link(link):
-        """Парсинг ссылки в объект конфига xray."""
         try:
             parsed = urlparse(link)
             scheme = parsed.scheme
-            fp = random.choice(config.TLS_FINGERPRINTS)
+            fp = random.choice(get_cfg('TLS_FINGERPRINTS', ["chrome"]))
             outbound = {"protocol": scheme, "settings": {}, "streamSettings": {}}
             
             if scheme == "vmess":
@@ -96,7 +104,6 @@ class XrayWrapper:
                 }
                 if data.get("net") == "ws":
                     outbound["streamSettings"]["wsSettings"] = {"path": data.get("path", "/"), "headers": {"Host": data.get("host", data.get("add"))}}
-
             elif scheme == "vless":
                 query = parse_qs(parsed.query)
                 outbound["settings"] = {"vnext": [{"address": parsed.hostname, "port": parsed.port, "users": [{"id": parsed.username, "encryption": query.get("encryption", ["none"])[0]}]}]}
@@ -109,13 +116,10 @@ class XrayWrapper:
                         outbound["streamSettings"][key].update({"publicKey": query.get("pbk", [""])[0], "shortId": query.get("sid", [""])[0], "spiderX": query.get("spx", ["/"])[0]})
                 if outbound["streamSettings"]["network"] == "ws":
                     outbound["streamSettings"]["wsSettings"] = {"path": query.get("path", ["/"])[0], "headers": {"Host": query.get("host", [""])[0]}}
-
             elif scheme == "trojan":
                 query = parse_qs(parsed.query)
                 outbound["settings"] = {"servers": [{"address": parsed.hostname, "port": parsed.port, "password": parsed.username}]}
                 outbound["streamSettings"] = {"security": "tls", "tlsSettings": {"serverName": query.get("sni", [""])[0], "fingerprint": fp}}
-            
-            # Поддержка Shadowsocks (простая реализация через ss-настройку)
             elif scheme == "ss":
                 import base64
                 decoded_ss = base64.b64decode(parsed.netloc.split('@')[0]).decode('utf-8')
@@ -144,12 +148,13 @@ class XrayWrapper:
             proc = subprocess.Popen(["xray", "-config", cfg_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             time.sleep(2)
 
-            target = random.choice(config.CHECK_TARGETS)
+            targets = get_cfg('CHECK_TARGETS', [{"url": "https://www.google.com", "marker": "google"}])
+            target = random.choice(targets)
             proxies = {'http': f'socks5h://127.0.0.1:{port}', 'https': f'socks5h://127.0.0.1:{port}'}
             
             start_t = time.time()
             try:
-                resp = requests.get(target["url"], proxies=proxies, timeout=config.CONNECT_TIMEOUT)
+                resp = requests.get(target["url"], proxies=proxies, timeout=get_cfg('CONNECT_TIMEOUT', 10))
                 result["ping"] = int((time.time() - start_t) * 1000)
                 if resp.status_code == 200:
                     result["working"] = True
@@ -157,26 +162,22 @@ class XrayWrapper:
             except: pass
 
             if result["working"]:
-                # ТЕСТ СКОРОСТИ ЧЕРЕЗ LIBRESPEED-CLI
-                if config.USE_LIBRESPEED:
+                if get_cfg('USE_LIBRESPEED', False):
                     try:
-                        # Используем socks5-прокси в команде librespeed
-                        ls_cmd = f"librespeed-cli {config.LIBRESPEED_ARGS} --proxy \"socks5://127.0.0.1:{port}\""
+                        args = get_cfg('LIBRESPEED_ARGS', "--json")
+                        ls_cmd = f"librespeed-cli {args} --proxy \"socks5://127.0.0.1:{port}\""
                         ls_proc = subprocess.run(ls_cmd, shell=True, capture_output=True, text=True, timeout=20)
                         if ls_proc.returncode == 0:
                             data = json.loads(ls_proc.stdout)
-                            # Переводим из Mbps в MB/s (bits to bytes / 8)
                             result["speed"] = round(data["download"] / 8, 2)
                     except: pass
                 
-                # Резервный метод (скачивание 1MB), если librespeed подвел
                 if result["speed"] == 0.0:
                     try:
                         r = requests.get("https://speed.hetzner.de/100MB.bin", proxies=proxies, timeout=10, stream=True)
                         s_t = time.time()
-                        chunk_size = 1024 * 1024
-                        for chunk in r.iter_content(chunk_size):
-                            if chunk: break # скачали 1MB
+                        for chunk in r.iter_content(1024 * 1024):
+                            if chunk: break
                         dur = time.time() - s_t
                         result["speed"] = round(1.0 / dur, 2) if dur > 0 else 0.1
                     except: pass
@@ -190,21 +191,24 @@ class XrayWrapper:
 def main():
     print(f"[{datetime.now()}] >>> BOT START <<<")
     
-    # Run count logic
-    if os.path.exists(config.RUN_COUNT_PATH):
-        with open(config.RUN_COUNT_PATH, 'r') as f: count = int(f.read().strip())
+    run_count_path = get_cfg('RUN_COUNT_PATH', '.run_count')
+    temp_setup_path = get_cfg('TEMP_SETUP_PATH', 'temp_setup.txt')
+
+    if os.path.exists(run_count_path):
+        with open(run_count_path, 'r') as f:
+            try: count = int(f.read().strip())
+            except: count = 0
         count += 1
     else: count = 1
-    with open(config.RUN_COUNT_PATH, 'w') as f: f.write(str(count))
+    with open(run_count_path, 'w') as f: f.write(str(count))
     
-    if count >= 2 and os.path.exists(config.TEMP_SETUP_PATH):
-        os.remove(config.TEMP_SETUP_PATH)
-        print("Cleanup: temp_setup.txt deleted.")
+    if count >= 2 and os.path.exists(temp_setup_path):
+        os.remove(temp_setup_path)
+        print(f"Cleanup: {temp_setup_path} deleted.")
 
-    # Fetch & Save Raw
     os.makedirs("subscriptions", exist_ok=True)
     all_text = ""
-    for url in config.SUBSCRIPTION_URLS:
+    for url in get_cfg('SUBSCRIPTION_URLS', []):
         try:
             r = requests.get(url, timeout=10)
             all_text += r.text + "\n"
@@ -212,11 +216,10 @@ def main():
     
     links = industrial_extractor(all_text)
     print(f"Extracted {len(links)} proxies.")
-    with open(config.RAW_PATH, 'w', encoding='utf-8') as f: f.write("\n".join(links))
+    with open(get_cfg('RAW_PATH', 'raw.txt'), 'w', encoding='utf-8') as f: f.write("\n".join(links))
 
-    # Parallel Execution
     results = []
-    with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
+    with ThreadPoolExecutor(max_workers=get_cfg('MAX_WORKERS', 4)) as executor:
         futures = [executor.submit(XrayWrapper.run_check, l, i) for i, l in enumerate(links)]
         for f in futures:
             res = f.result()
@@ -225,18 +228,16 @@ def main():
             m = " [APP]" if res["app_found"] else ""
             print(f"[{res['id']}] {status}{m} ping:{res['ping']} spd:{res['speed']}MB/s | {res['raw'][:40]}...")
 
-    # Sorting
     working, fast = [], []
     for r in results:
         if not r["working"]: continue
         tag = f"ping:{r['ping']}ms spd:{r['speed']}MB/s date:{datetime.now().strftime('%d/%m %H:%M')}"
-        # Формат: прокси-ссылка#данные
         entry = f"{r['raw'].split('#')[0]}#{tag}"
-        if r["app_found"] and r["speed"] >= config.MIN_SPEED_MBPS: working.append(entry)
-        elif r["speed"] >= config.MIN_SPEED_FAST: fast.append(entry)
+        if r["app_found"] and r["speed"] >= get_cfg('MIN_SPEED_MBPS', 0.5): working.append(entry)
+        elif r["speed"] >= get_cfg('MIN_SPEED_FAST', 0.2): fast.append(entry)
 
-    with open(config.WORKING_PATH, 'w', encoding='utf-8') as f: f.write("\n".join(working))
-    with open(config.FAST_PATH, 'w', encoding='utf-8') as f: f.write("\n".join(fast))
+    with open(get_cfg('WORKING_PATH', 'working.txt'), 'w', encoding='utf-8') as f: f.write("\n".join(working))
+    with open(get_cfg('FAST_PATH', 'fast.txt'), 'w', encoding='utf-8') as f: f.write("\n".join(fast))
     print(f"Stats: Working={len(working)}, Fast={len(fast)}")
 
 if __name__ == "__main__":
