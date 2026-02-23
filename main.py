@@ -45,7 +45,7 @@ def process_single_link(link):
 def main():
     print(f"[LOG] Бот запущен: {datetime.now()}")
     
-    # 1. Инициализация окружения (фикс ошибки ImportError)
+    # 1. Инициализация окружения (фикс прав доступа и путей)
     download_binaries()
     
     # 2. Сбор ссылок из всех источников
