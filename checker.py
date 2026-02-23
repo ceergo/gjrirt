@@ -21,8 +21,15 @@ def download_binaries():
     import platform
     print(f"[LOG] Проверка платформы: {platform.system()} {platform.machine()}")
     
+    # Определяем реальный путь к Xray
+    # Если в конфиге ./xray и его нет, пробуем системный /usr/local/bin/xray
+    actual_xray_path = XRAY_PATH
+    if XRAY_PATH == "./xray" and not os.path.exists("./xray"):
+        if os.path.exists("/usr/local/bin/xray"):
+            actual_xray_path = "/usr/local/bin/xray"
+    
     paths_to_check = [
-        ("Xray", XRAY_PATH),
+        ("Xray", actual_xray_path),
         ("Librespeed", LIBRESPEED_PATH)
     ]
     
@@ -44,6 +51,12 @@ class ProxyChecker:
         self.port = get_free_port()
         self.process: subprocess.Popen | None = None
         self.fingerprint = "chrome"
+        
+        # Определяем актуальный путь к бинарнику динамически
+        self.xray_bin = XRAY_PATH
+        if self.xray_bin == "./xray" and not os.path.exists("./xray"):
+            if os.path.exists("/usr/local/bin/xray"):
+                self.xray_bin = "/usr/local/bin/xray"
         
     def _parse_vmess(self, link):
         try:
@@ -163,14 +176,14 @@ class ProxyChecker:
         with open(config_path, "w") as f:
             json.dump(config, f)
         try:
-            self.process = subprocess.Popen([XRAY_PATH, "run", "-c", config_path], 
+            self.process = subprocess.Popen([self.xray_bin, "run", "-c", config_path], 
                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             time.sleep(1.5)
             if self.process.poll() is not None:
                 return False
             return True
         except Exception as e:
-            print(f"[ERROR] Ошибка запуска Xray ({XRAY_PATH}): {e}")
+            print(f"[ERROR] Ошибка запуска Xray ({self.xray_bin}): {e}")
             return False
 
     def stop_xray(self):
