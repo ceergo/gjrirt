@@ -40,14 +40,20 @@ UTLS_FINGERPRINTS = ["chrome", "firefox", "safari", "edge", "randomized"]
 CONNECT_TIMEOUT = 10                             # Таймаут подключения (сек)
 DOWNLOAD_TIMEOUT = 30                            # Таймаут замера скорости (сек)
 
-# Пути к бинарникам
-XRAY_PATH = "./xray"
-LIBRESPEED_PATH = "./librespeed-cli"
+# Дефолтные пути к бинарникам (теперь они гибкие)
+DEFAULT_XRAY_PATH = "./xray"
+DEFAULT_LIBRESPEED_PATH = "./librespeed-cli"
 
 # Протоколы, которые мы ищем (поиск нечувствителен к регистру)
 PROTOCOLS = ["vless", "vmess", "trojan", "shadowsocks", "ss", "hysteria2", "tuic"]
 
 # ==============================================================================
+
+def get_actual_paths():
+    """Определяет актуальные пути к бинарникам из окружения или дефолтов."""
+    xray = os.getenv("XRAY_PATH", DEFAULT_XRAY_PATH)
+    librespeed = os.getenv("LIBRESPEED_PATH", DEFAULT_LIBRESPEED_PATH)
+    return xray, librespeed
 
 def fetch_remote_subscriptions() -> str:
     """Скачивает подписки из внешних источников и объединяет их."""
@@ -67,18 +73,14 @@ def clean_link(link):
     Очищает ссылку: удаляет ВСЁ начиная с символа # (включительно) 
     и обрезает до начала следующего протокола, если они склеены.
     """
-    # 1. Удаляем всё от # включительно
     if "#" in link:
         link = link.split("#")[0]
     
     link = link.strip()
     
-    # 2. Если в ссылке "прилип" другой протокол в конце, обрезаем его
-    # Пример: vmess://...vless://... -> берем только vmess://...
     pattern = r'(?i)(' + '|'.join(PROTOCOLS) + r')://'
     matches = list(re.finditer(pattern, link))
     if len(matches) > 1:
-        # Если найдено больше одного начала протокола, обрезаем вторую часть
         link = link[:matches[1].start()]
     
     return link.strip()
@@ -89,20 +91,16 @@ def parse_subscriptions(content: str) -> list[str]:
     Поддерживает: прямое перечисление, Base64 (включая вложенные блоки).
     """
     found_links: list[str] = []
-    
-    # Регулярка для поиска начала протокола
     pattern_proto = r'(?i)(' + '|'.join(PROTOCOLS) + r')://'
     
     def process_text(text: str):
         text = text.strip()
         if not text:
             return
-        # 1. Если в тексте есть явные ссылки, вырезаем их
         starts = [m.start() for m in re.finditer(pattern_proto, text)]
         if starts:
             for i in range(len(starts)):
                 s_idx = starts[i]
-                # Гарантируем, что e_idx всегда определен
                 if i + 1 < len(starts):
                     e_idx = starts[i+1]
                 else:
@@ -113,10 +111,7 @@ def parse_subscriptions(content: str) -> list[str]:
                 if cleaned:
                     found_links.append(cleaned)
             return
-        # 2. Если ссылок нет, возможно это Base64 блок
-        # Пробуем декодировать (убираем лишние пробелы и добавляем паддинг)
         try:
-            # Очищаем от мусорных символов, которые могут быть в Base64
             b64_data = re.sub(r'[^a-zA-Z0-9+/=]', '', text)
             if len(b64_data) > 10:
                 missing_padding = len(b64_data) % 4
@@ -126,16 +121,12 @@ def parse_subscriptions(content: str) -> list[str]:
                 decoded_bytes = base64.b64decode(b64_data)
                 decoded_str = decoded_bytes.decode('utf-8', errors='ignore')
                 
-                # Если после декодирования нашли ссылки - отлично
                 if re.search(pattern_proto, decoded_str):
-                    # Рекурсивно обрабатываем декодированный текст (на случай новых b64 внутри)
-                    # Разрезаем по строкам, чтобы не уйти в бесконечную рекурсию на плохих данных
                     for line in decoded_str.splitlines():
                         process_text(line)
         except:
             pass
 
-    # Первоначальный разбор (делим по пробелам и переносам, чтобы ловить блоки b64)
     chunks = content.split()
     for c in chunks:
         process_text(c)
@@ -149,31 +140,32 @@ def get_free_port():
         s.bind(('', 0))
         return s.getsockname()[1]
 
-def download_binaries():
+def setup_binaries():
     """
-    Автоматически скачивает xray и librespeed-cli под текущую систему.
+    Проверяет наличие бинарников по путям и устанавливает права.
     """
-    import platform
+    xray_path, librespeed_path = get_actual_paths()
     print(f"[LOG] Проверка платформы: {platform.system()} {platform.machine()}")
-    # В GitHub Actions эти файлы обычно добавляются через setup-xray или curl в yml
-    # Здесь мы просто проверяем их наличие.
-    if os.path.exists(XRAY_PATH):
+    
+    # Проверка Xray
+    if os.path.exists(xray_path):
         try:
-            os.chmod(XRAY_PATH, 0o755)
-            print(f"[LOG] Права на выполнение для {XRAY_PATH} установлены.")
+            os.chmod(xray_path, 0o755)
+            print(f"[LOG] Использование Xray по пути: {xray_path}")
         except Exception as e:
-            print(f"[ERROR] Не удалось установить права для {XRAY_PATH}: {e}")
+            print(f"[ERROR] Не удалось установить права для {xray_path}: {e}")
     else:
-        print(f"[WARNING] {XRAY_PATH} не найден.")
+        print(f"[WARNING] Xray не найден по пути: {xray_path}")
         
-    if os.path.exists(LIBRESPEED_PATH):
+    # Проверка Librespeed
+    if os.path.exists(librespeed_path):
         try:
-            os.chmod(LIBRESPEED_PATH, 0o755)
-            print(f"[LOG] Права на выполнение для {LIBRESPEED_PATH} установлены.")
+            os.chmod(librespeed_path, 0o755)
+            print(f"[LOG] Использование Librespeed по пути: {librespeed_path}")
         except Exception as e:
-            print(f"[ERROR] Не удалось установить права для {LIBRESPEED_PATH}: {e}")
+            print(f"[ERROR] Не удалось установить права для {librespeed_path}: {e}")
     else:
-        print(f"[WARNING] {LIBRESPEED_PATH} не найден.")
+        print(f"[WARNING] Librespeed не найден по пути: {librespeed_path}")
 
 class ProxyChecker:
     def __init__(self, link):
@@ -181,12 +173,11 @@ class ProxyChecker:
         self.port = get_free_port()
         self.process: subprocess.Popen | None = None
         self.fingerprint = "chrome"
+        self.xray_bin, self.librespeed_bin = get_actual_paths()
         
     def _parse_vmess(self, link):
-        """Парсинг vmess:// links (Base64 JSON)"""
         try:
             data = link.replace("vmess://", "").strip()
-            # Очищаем от мусора и исправляем паддинг
             data = re.sub(r'[^a-zA-Z0-9+/=]', '', data)
             missing_padding = len(data) % 4
             if missing_padding:
@@ -194,15 +185,10 @@ class ProxyChecker:
             
             decoded = base64.b64decode(data).decode('utf-8')
             return json.loads(decoded)
-        except Exception as e:
-            # print(f"[DEBUG] VMESS parse error: {e}")
+        except:
             return None
 
     def generate_xray_config(self):
-        """
-        Генерирует конфиг для Xray. 
-        Поддерживает VLESS, VMESS, Trojan, Shadowsocks, Hysteria2, TUIC.
-        """
         try:
             config = {
                 "log": {"loglevel": "none"},
@@ -214,15 +200,11 @@ class ProxyChecker:
                 }],
                 "outbounds": []
             }
-            # Логика обертки (базовая реализация для примера)
             outbound = {"protocol": "vless", "settings": {}, "streamSettings": {}}
             
-            # Рандомизация отпечатка
-            import random
             self.fingerprint = random.choice(UTLS_FINGERPRINTS)
             if self.fingerprint == "randomized": self.fingerprint = "chrome"
             
-            # Определение протокола
             link_lower = self.link.lower()
             if "vmess://" in link_lower:
                 v_data = self._parse_vmess(self.link)
@@ -243,12 +225,10 @@ class ProxyChecker:
                 params = parse_qs(parsed.query)
                 proto = "vless" if "vless://" in link_lower else "trojan"
                 
-                # Базовые настройки безопасности
                 security = params.get("security", ["none"])[0]
                 sni = params.get("sni", [""])[0]
                 fp = params.get("fp", [self.fingerprint])[0]
                 
-                # Попытка извлечь UUID / Пароль
                 user_id = parsed.username or ""
                 if not user_id and ":" in parsed.netloc:
                     user_id = parsed.netloc.split("@")[0].split(":")[0]
@@ -274,7 +254,6 @@ class ProxyChecker:
                         "grpcSettings": {"serviceName": params.get("serviceName", [""])[0]} if params.get("type") == ["grpc"] else {}
                     }
                 }
-            # Shadowsocks
             elif "ss://" in link_lower:
                 parsed = urlparse(self.link)
                 user_info = parsed.username or ""
@@ -311,8 +290,6 @@ class ProxyChecker:
                     "settings": {"servers": [{"address": host, "port": int(port), 
                                              "method": method, "password": password}]}
                 }
-            
-            # Hysteria2 / TUIC (упрощенно)
             elif "hysteria2://" in link_lower or "tuic://" in link_lower:
                 parsed = urlparse(self.link)
                 proto = "hysteria2" if "hysteria2" in link_lower else "tuic"
@@ -323,18 +300,14 @@ class ProxyChecker:
                     "streamSettings": {"network": "udp"}
                 }
             
-            # Собираем список outbound-объектов
             outbounds: list[dict] = [outbound]
             outbounds.append({"protocol": "freedom", "tag": "direct"})
-            
             config["outbounds"] = outbounds
             return config
-        except Exception as e:
-            print(f"[DEBUG] Ошибка генерации конфига: {e}")
+        except:
             return None
 
     def start_xray(self):
-        """Запуск процесса Xray"""
         config = self.generate_xray_config()
         if not config: return False
         
@@ -343,38 +316,26 @@ class ProxyChecker:
             json.dump(config, f)
             
         try:
-            xray_bin = os.getenv("XRAY_PATH", XRAY_PATH)
-            # Пытаемся запустить
             self.process = subprocess.Popen(
-                [xray_bin, "-c", config_path],
+                [self.xray_bin, "-c", config_path],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
-            
-            # Ждем и проверяем, не упал ли он сразу
             time.sleep(2.0) 
             if self.process is None or self.process.poll() is not None:
-                # Процесс не запустился или упал
                 self.stop_xray()
                 return False
-                
             return True
-        except Exception as e:
-            print(f"[ERROR] Не удалось запустить Xray ({xray_bin}): {e}")
+        except:
             return False
 
     def stop_xray(self):
-        """Остановка и удаление мусора"""
         if self.process is not None:
             try:
                 self.process.terminate()
-                try:
-                    self.process.wait(timeout=2)
-                except:
-                    if self.process is not None:
-                        self.process.kill()
-            except Exception as e:
-                print(f"[DEBUG] Ошибка при остановке Xray: {e}")
+                try: self.process.wait(timeout=2)
+                except: self.process.kill()
+            except: pass
         
         config_path: str = f"config_{self.port}.json"
         if os.path.exists(config_path):
@@ -398,32 +359,23 @@ class ProxyChecker:
         return False, False, 0
 
     def check_speed(self):
-        """Замер скорости через librespeed-cli."""
         cmd = [
-            os.getenv("LIBRESPEED_PATH", LIBRESPEED_PATH),
+            self.librespeed_bin,
             "--proxy", f"socks5://127.0.0.1:{self.port}",
             "--json"
         ]
         try:
-            # Запускаем тест скорости
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=DOWNLOAD_TIMEOUT)
             if result.returncode == 0:
                 data = json.loads(result.stdout)
-                # Извлекаем скорость в Mbps и пинг
-                download = data.get("download", 0) / 125000 # Перевод в Mbps
+                download = data.get("download", 0) / 125000 
                 ping = data.get("ping", 999)
-                
                 if download >= MIN_SPEED_MBPS:
-                    print(f"[SPEED] {self.link[:15]}... | {download:.2f} Mbps | Ping: {ping}ms")
                     return download
-        except Exception as e:
-            pass
+        except: pass
         return 0
 
 def process_single_link(link):
-    """
-    Полный цикл проверки одной ссылки.
-    """
     checker = ProxyChecker(link)
     try:
         if not checker.start_xray():
@@ -432,112 +384,84 @@ def process_single_link(link):
         alive, has_app, latency = checker.check_availability()
         
         if alive:
-            # Если домен доступен, проверяем на скорость
             speed = checker.check_speed()
-            # Если speed > 0, значит прошел порог MIN_SPEED_MBPS
             if speed > 0:
                 status = "working_app" if has_app else "working_fast"
                 category_name = "APP" if has_app else "FAST"
                 filename = WORKING_APP if has_app else WORKING_FAST
-                print(f"[LIVE] {link} | {category_name} | Ping: {latency*1000:.0f}ms ({latency:.2f}s) | Speed: {speed:.2f} Mbps -> {filename}")
+                print(f"[LIVE] {link[:40]}... | {category_name} | Ping: {latency*1000:.0f}ms | Speed: {speed:.2f} Mbps")
                 return {"link": link, "status": status}
             else:
-                print(f"[LIVE] {link} | Низкая скорость или ошибка замера | Ping: {latency*1000:.0f}ms")
+                print(f"[LIVE] {link[:40]}... | Низкая скорость | Ping: {latency*1000:.0f}ms")
         else:
-            print(f"[LIVE] {link} | Недоступен (Dead)")
+            print(f"[LIVE] {link[:40]}... | Dead")
         
         return {"link": link, "status": "dead"}
-    except Exception as e:
+    except:
         return {"link": link, "status": "error"}
     finally:
         checker.stop_xray()
 
 def update_file(filename, new_links):
-    """Обновляет файл: добавляет новые, удаляет дубли, сохраняет только свежее."""
     existing = []
     if os.path.exists(filename):
         with open(filename, "r", encoding="utf-8") as f:
             existing = f.read().splitlines()
-    
-    # Объединяем, удаляем дубли, очищаем
     updated = sorted(list(set(filter(None, existing + new_links))))
-    
     with open(filename, "w", encoding="utf-8") as f:
         f.write("\n".join(updated) + "\n")
 
 def main():
     print(f"[LOG] Бот запущен: {datetime.now()}")
+    setup_binaries()
     
-    # 1. Загрузка бинарников
-    download_binaries()
-    # 2. Получение ссылок из внешних источников и локального файла
-    print("[LOG] Сбор ссылок из всех источников...")
     remote_content = fetch_remote_subscriptions()
-    
     local_content = ""
     if os.path.exists(RAW_SUBSCRIPTION_FILE):
         with open(RAW_SUBSCRIPTION_FILE, "r", encoding="utf-8") as f:
             local_content = f.read()
             
-    # Объединяем всё в одну "кашу" для парсера
     total_content = remote_content + "\n" + local_content
-    
     all_links = parse_subscriptions(total_content)
-    print(f"[LOG] Всего уникальных ссылок после слияния и очистки: {len(all_links)}")
-    # 3. Обновляем нашу рабочую подписку
+    print(f"[LOG] Всего уникальных ссылок: {len(all_links)}")
+    
     update_file(OUR_SUBSCRIPTION, all_links)
-    # 4. Проверка (Многопоточность)
+    
     results_app = []
     results_fast = []
     working_links = []
-    print(f"[LOG] Запуск проверки {len(all_links)} ссылок...")
-    print(f"[INFO] Цель: {CHECK_URL} | Поток: {MAX_WORKERS} | Мин. скорость: {MIN_SPEED_MBPS} Mbps")
     
     count_finished = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        # Передаем ссылки в пул потоков
         future_to_link = {executor.submit(process_single_link, link): link for link in all_links}
         for future in concurrent.futures.as_completed(future_to_link):
             count_finished += 1
             try:
                 res = future.result()
-                if res and isinstance(res, dict):
+                if res:
                     status = res.get("status")
                     link = res.get("link")
-                    
-                    if status == "working_app" and link:
+                    if status == "working_app":
                         results_app.append(link)
                         working_links.append(link)
-                    elif status == "working_fast" and link:
+                    elif status == "working_fast":
                         results_fast.append(link)
                         working_links.append(link)
                 
-                # Каждые 5 ссылок или в конце выводим статистику
                 if count_finished % 5 == 0 or count_finished == len(all_links):
-                    remaining = len(all_links) - count_finished
-                    print(f"\n[STATS] Прогресс: {count_finished}/{len(all_links)} (Осталось: {remaining})")
-                    print(f"[STATS] Живых всего: {len(working_links)} (APP: {len(results_app)}, FAST: {len(results_fast)})\n")
-            except Exception as e:
-                print(f"[ERROR] Ошибка в потоке: {e}")
-    # 5. Итоговое сохранение и ОЧИСТКА ВСЕХ ФАЙЛОВ
-    # Мы перезаписываем файлы, оставляя только те ссылки, которые прошли текущую проверку
+                    print(f"[STATS] Прогресс: {count_finished}/{len(all_links)} | Найдено: {len(working_links)}")
+            except: pass
+
+    update_file(WORKING_APP, results_app)
+    update_file(WORKING_FAST, results_fast)
     
-    # 5.1 Результаты по категориям
-    update_file(WORKING_APP, results_app)   # Здесь будут ТОЛЬКО работающие сейчас с app
-    update_file(WORKING_FAST, results_fast) # Здесь будут ТОЛЬКО работающие сейчас быстрые
-    
-    # 5.2 Очистка основного источника (subscription_raw.txt)
     with open(RAW_SUBSCRIPTION_FILE, "w", encoding="utf-8") as f:
         f.write("\n".join(working_links) + "\n")
     
-    # 5.3 Очистка нашей копии
     with open(OUR_SUBSCRIPTION, "w", encoding="utf-8") as f:
         f.write("\n".join(working_links) + "\n")
     
-    print(f"[LOG] Проверка завершена. Найдено живых: {len(working_links)}")
-    print(f"[LOG] Сохранено в WORKING_APP: {len(results_app)}")
-    print(f"[LOG] Сохранено в WORKING_FAST: {len(results_fast)}")
-    print(f"[LOG] Файлы {RAW_SUBSCRIPTION_FILE} и {OUR_SUBSCRIPTION} очищены от нерабочих ссылок.")
+    print(f"[LOG] Завершено. Живых: {len(working_links)} (APP: {len(results_app)}, FAST: {len(results_fast)})")
 
 if __name__ == "__main__":
     try:
