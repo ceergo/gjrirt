@@ -16,30 +16,27 @@ from utils import get_free_port
 def download_binaries():
     """
     Проверяет наличие бинарных файлов и устанавливает права на исполнение.
-    В GitHub Actions или Linux это критически важно для работы subprocess.
+    Корректно обрабатывает системные пути (например, /usr/local/bin/xray).
     """
     import platform
     print(f"[LOG] Проверка платформы: {platform.system()} {platform.machine()}")
     
-    # Проверка Xray
-    if os.path.exists(XRAY_PATH):
-        try:
-            os.chmod(XRAY_PATH, 0o755)
-            print(f"[LOG] Права на выполнение для {XRAY_PATH} установлены.")
-        except Exception as e:
-            print(f"[ERROR] Не удалось установить права для {XRAY_PATH}: {e}")
-    else:
-        print(f"[WARNING] Бинарный файл {XRAY_PATH} не найден по указанному пути.")
-        
-    # Проверка Librespeed
-    if os.path.exists(LIBRESPEED_PATH):
-        try:
-            os.chmod(LIBRESPEED_PATH, 0o755)
-            print(f"[LOG] Права на выполнение для {LIBRESPEED_PATH} установлены.")
-        except Exception as e:
-            print(f"[ERROR] Не удалось установить права для {LIBRESPEED_PATH}: {e}")
-    else:
-        print(f"[WARNING] Бинарный файл {LIBRESPEED_PATH} не найден по указанному пути.")
+    paths_to_check = [
+        ("Xray", XRAY_PATH),
+        ("Librespeed", LIBRESPEED_PATH)
+    ]
+    
+    for name, path in paths_to_check:
+        if os.path.exists(path):
+            try:
+                # Пытаемся установить права, если это возможно
+                os.chmod(path, 0o755)
+                print(f"[LOG] Бинарный файл {name} найден: {path} (Права настроены)")
+            except Exception as e:
+                print(f"[WARNING] Не удалось изменить права для {name} (возможно, запущен от root): {e}")
+        else:
+            print(f"[ERROR] Бинарный файл {name} НЕ НАЙДЕН по пути: {path}")
+            print(f"[DEBUG] Текущая рабочая директория: {os.getcwd()}")
 
 class ProxyChecker:
     def __init__(self, link):
@@ -51,7 +48,6 @@ class ProxyChecker:
     def _parse_vmess(self, link):
         try:
             data = link.replace("vmess://", "").strip()
-            # Очистка от возможных пробелов или символов новой строки
             data = re.sub(r'[^a-zA-Z0-9+/=]', '', data)
             missing_padding = len(data) % 4
             if missing_padding:
@@ -62,6 +58,10 @@ class ProxyChecker:
             return None
 
     def generate_xray_config(self):
+        """
+        Генерирует JSON конфиг для Xray. 
+        В будущем здесь можно будет использовать библиотеку для парсинга.
+        """
         try:
             config = {
                 "log": {"loglevel": "none"},
@@ -74,13 +74,12 @@ class ProxyChecker:
                 "outbounds": []
             }
             
-            # Настройка Outbound в зависимости от протокола
-            outbound = {"protocol": "vless", "settings": {}, "streamSettings": {}}
             self.fingerprint = random.choice(UTLS_FINGERPRINTS)
             if self.fingerprint == "randomized": 
                 self.fingerprint = "chrome"
             
             link_lower = self.link.lower()
+            outbound = {"protocol": "vless", "settings": {}, "streamSettings": {}}
             
             if "vmess://" in link_lower:
                 v_data = self._parse_vmess(self.link)
@@ -105,8 +104,8 @@ class ProxyChecker:
                 fp = params.get("fp", [self.fingerprint])[0]
                 
                 user_id = parsed.username or ""
-                if not user_id and ":" in parsed.netloc:
-                    user_id = parsed.netloc.split("@")[0].split(":")[0]
+                if not user_id and "@" in parsed.netloc:
+                    user_id = parsed.netloc.split("@")[0]
                 
                 outbound = {
                     "protocol": proto,
@@ -130,36 +129,18 @@ class ProxyChecker:
                 }
             elif "ss://" in link_lower:
                 parsed = urlparse(self.link)
-                user_info = parsed.username or ""
-                if "@" not in self.link.split("://")[-1] or (not user_info and ":" not in parsed.netloc):
+                # Базовая поддержка SS (SIP002)
+                if "@" in parsed.netloc:
+                    user_pass_b64 = parsed.netloc.split("@")[0]
                     try:
-                        b64_part = self.link.split("://")[-1].split("#")[0]
-                        decoded_full = base64.b64decode(b64_part + "==").decode('utf-8', errors='ignore')
-                        if "@" in decoded_full:
-                            user_pass_part, host_port_part = decoded_full.split("@", 1)
-                            method, password = user_pass_part.split(":", 1)
-                            if ":" in host_port_part:
-                                host, port = host_port_part.split(":", 1)
-                                port = int(port.split("/")[0])
-                            else: host, port = host_port_part, 8388
-                        else: return None
+                        decoded = base64.b64decode(user_pass_b64 + "==").decode('utf-8')
+                        method, password = decoded.split(":", 1)
+                        outbound = {
+                            "protocol": "shadowsocks",
+                            "settings": {"servers": [{"address": parsed.hostname, "port": parsed.port, "method": method, "password": password}]}
+                        }
                     except: return None
-                else:
-                    user_pass = (parsed.netloc.split("@")[0])
-                    try:
-                        if ":" in user_pass: 
-                            method, password = user_pass.split(":", 1)
-                        else:
-                            decoded = base64.b64decode(user_pass + "==").decode('utf-8', errors='ignore')
-                            method, password = decoded.split(":", 1)
-                        host = parsed.hostname
-                        port = parsed.port or 8388
-                    except: return None
-                
-                outbound = {
-                    "protocol": "shadowsocks",
-                    "settings": {"servers": [{"address": host, "port": int(port), "method": method, "password": password}]}
-                }
+                else: return None
             elif "hysteria2://" in link_lower or "tuic://" in link_lower:
                 parsed = urlparse(self.link)
                 proto = "hysteria2" if "hysteria2" in link_lower else "tuic"
@@ -169,12 +150,10 @@ class ProxyChecker:
                     "streamSettings": {"network": "udp"}
                 }
             
-            outbounds: list[dict] = [outbound]
-            outbounds.append({"protocol": "freedom", "tag": "direct"})
-            config["outbounds"] = outbounds
+            config["outbounds"] = [outbound, {"protocol": "freedom", "tag": "direct"}]
             return config
         except Exception as e:
-            print(f"[DEBUG] Ошибка генерации конфига: {e}")
+            print(f"[DEBUG] Ошибка генерации: {e}")
             return None
 
     def start_xray(self):
@@ -184,23 +163,24 @@ class ProxyChecker:
         with open(config_path, "w") as f:
             json.dump(config, f)
         try:
-            self.process = subprocess.Popen([XRAY_PATH, "-c", config_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            time.sleep(1.2) # Даем время на бинд порта
+            self.process = subprocess.Popen([XRAY_PATH, "run", "-c", config_path], 
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(1.5)
             if self.process.poll() is not None:
-                self.stop_xray()
                 return False
             return True
         except Exception as e:
-            print(f"[ERROR] Не удалось запустить Xray: {e}")
+            print(f"[ERROR] Ошибка запуска Xray ({XRAY_PATH}): {e}")
             return False
 
     def stop_xray(self):
-        if self.process is not None:
+        if self.process:
             try:
                 self.process.terminate()
-                try: self.process.wait(timeout=2)
-                except: self.process.kill()
-            except: pass
+                self.process.wait(timeout=2)
+            except:
+                try: self.process.kill()
+                except: pass
         config_path = f"config_{self.port}.json"
         if os.path.exists(config_path):
             try: os.remove(config_path)
@@ -224,9 +204,8 @@ class ProxyChecker:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=DOWNLOAD_TIMEOUT)
             if result.returncode == 0:
                 data = json.loads(result.stdout)
-                download = data.get("download", 0) / 125000 # Convert to Mbps
-                ping = data.get("ping", 999)
-                if download >= MIN_SPEED_MBPS:
-                    return download
+                download_mbps = data.get("download", 0) / 125000
+                if download_mbps >= MIN_SPEED_MBPS:
+                    return download_mbps
         except: pass
         return 0
