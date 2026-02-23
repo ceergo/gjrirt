@@ -23,36 +23,66 @@ except ImportError:
 def get_cfg(attr, default=None):
     return getattr(config, attr, default)
 
+# Lock для чистого логирования (чтобы потоки не перемешивались)
+log_lock = threading.Lock()
+
+def safe_log(msg):
+    with log_lock:
+        print(msg)
+        sys.stdout.flush()
+
 # ================================================================
 # IDENTITY & EXTRACTION
 # ================================================================
 
 def extract_server_identity(node_string):
+    """Извлечение хоста и порта для предотвращения дублей."""
     try:
         url_part = node_string.split('#')[0]
+        # Для SS бывает формат ss://base64@host:port
+        if "ss://" in url_part and "@" not in url_part:
+            # Возможно всё в base64
+            try:
+                b64 = url_part[5:]
+                # Добавляем падинг
+                missing_padding = len(b64) % 4
+                if missing_padding: b64 += '=' * (4 - missing_padding)
+                decoded = base64.b64decode(b64).decode('utf-8', errors='ignore')
+                if "@" in decoded:
+                    return decoded.split("@")[1]
+            except: pass
+            
         parsed = urlparse(url_part)
+        if parsed.hostname and parsed.port:
+            return f"{parsed.hostname}:{parsed.port}"
         if parsed.netloc:
             netloc = parsed.netloc
-            return netloc.split('@')[1] if '@' in netloc else netloc
-        match = re.search(r'@([^:/]+):(\d+)', node_string)
-        if match: return f"{match.group(1)}:{match.group(2)}"
+            if '@' in netloc:
+                res = netloc.split('@')[1]
+                if ":" in res: return res
+                return f"{res}:{parsed.port or 80}"
+            return netloc
+            
+        match = re.search(r'([a-zA-Z0-9\.-]+):(\d{2,5})', url_part)
+        if match: return match.group(0)
     except: pass
     return node_string
 
 def industrial_extractor(source_text):
     patterns = {
-        'vless': r'vless://[^\s]+',
-        'vmess': r'vmess://[^\s]+',
-        'trojan': r'trojan://[^\s]+',
-        'ss': r'ss://[^\s]+',
-        'hy2': r'hy2://[^\s]+',
-        'tuic': r'tuic://[^\s]+'
+        'vless': r'vless://[^\s,"]+',
+        'vmess': r'vmess://[^\s,"]+',
+        'trojan': r'trojan://[^\s,"]+',
+        'ss': r'ss://[^\s,"]+',
+        'hy2': r'hy2://[^\s,"]+',
+        'tuic': r'tuic://[^\s,"]+'
     }
     found_configs = []
     for proto, pattern in patterns.items():
         found_configs.extend(re.findall(pattern, source_text))
     
-    b64_blocks = re.findall(r'[A-Za-z0-9+/]{50,}=*', source_text)
+    # Base64 блоки
+    b64_blocks = re.findall(r'[A-Za-z0-9+/]{80,}=*', source_text)
     for block in b64_blocks:
         try:
             missing_padding = len(block) % 4
@@ -61,9 +91,10 @@ def industrial_extractor(source_text):
             if "://" in decoded: found_configs.extend(industrial_extractor(decoded))
         except: continue
             
+    # Дедупликация в рамках вызова
     unique_nodes = {}
     for node in found_configs:
-        node = node.strip().strip(',')
+        node = node.strip().strip(',').strip('"')
         identity = extract_server_identity(node)
         if identity not in unique_nodes: unique_nodes[identity] = node
     return list(unique_nodes.values())
@@ -76,10 +107,10 @@ class XrayWrapper:
     @staticmethod
     def get_free_port():
         port_range = get_cfg('XRAY_PORT_RANGE', (12000, 20000))
-        for _ in range(15):
+        for _ in range(20):
             port = random.randint(port_range[0], port_range[1])
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(0.3)
+                s.settimeout(0.2)
                 if s.connect_ex(('127.0.0.1', port)) != 0: return port
         return None
 
@@ -88,9 +119,12 @@ class XrayWrapper:
         try:
             parsed = urlparse(link)
             scheme = parsed.scheme
-            fp = random.choice(get_cfg('TLS_FINGERPRINTS', ["chrome", "firefox", "safari"]))
+            fp = random.choice(get_cfg('TLS_FINGERPRINTS', ["chrome", "firefox", "safari", "ios"]))
             outbound = {"protocol": scheme, "settings": {}, "streamSettings": {}}
             
+            # Рандомный User-Agent для тестов
+            ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
             if scheme == "vmess":
                 data = json.loads(base64.b64decode(link[8:].split('#')[0]).decode('utf-8'))
                 outbound = {
@@ -103,7 +137,8 @@ class XrayWrapper:
                     }
                 }
                 if data.get("net") == "ws":
-                    outbound["streamSettings"]["wsSettings"] = {"path": data.get("path", "/"), "headers": {"Host": data.get("host", data.get("add"))}}
+                    outbound["streamSettings"]["wsSettings"] = {"path": data.get("path", "/"), "headers": {"Host": data.get("host", data.get("add")), "User-Agent": ua}}
+
             elif scheme == "vless":
                 query = parse_qs(parsed.query)
                 outbound["settings"] = {"vnext": [{"address": parsed.hostname, "port": parsed.port, "users": [{"id": parsed.username, "encryption": query.get("encryption", ["none"])[0]}]}]}
@@ -115,19 +150,32 @@ class XrayWrapper:
                     if sec == "reality":
                         outbound["streamSettings"][key].update({"publicKey": query.get("pbk", [""])[0], "shortId": query.get("sid", [""])[0], "spiderX": query.get("spx", ["/"])[0]})
                 if outbound["streamSettings"]["network"] == "ws":
-                    outbound["streamSettings"]["wsSettings"] = {"path": query.get("path", ["/"])[0], "headers": {"Host": query.get("host", [""])[0]}}
+                    outbound["streamSettings"]["wsSettings"] = {"path": query.get("path", ["/"])[0], "headers": {"Host": query.get("host", [""])[0], "User-Agent": ua}}
+
             elif scheme == "trojan":
                 query = parse_qs(parsed.query)
                 outbound["settings"] = {"servers": [{"address": parsed.hostname, "port": parsed.port, "password": parsed.username}]}
                 outbound["streamSettings"] = {"security": "tls", "tlsSettings": {"serverName": query.get("sni", [""])[0], "fingerprint": fp}}
+            
             elif scheme == "ss":
-                try:
-                    import base64
-                    decoded_ss = base64.b64decode(parsed.netloc.split('@')[0]).decode('utf-8')
-                    method, passwd = decoded_ss.split(':')
-                    outbound["protocol"] = "shadowsocks"
-                    outbound["settings"] = {"servers": [{"address": parsed.hostname, "port": parsed.port, "method": method, "password": passwd}]}
-                except: return None
+                # Обработка ss://base64(method:password)@host:port
+                netloc = parsed.netloc
+                if "@" in netloc:
+                    user_info, server_info = netloc.split("@")
+                    try:
+                        # Добавляем падинг для base64
+                        missing_padding = len(user_info) % 4
+                        if missing_padding: user_info += '=' * (4 - missing_padding)
+                        decoded_user = base64.b64decode(user_info).decode('utf-8')
+                        method, passwd = decoded_user.split(":")
+                    except: return None
+                    host = server_info.split(":")[0]
+                    port = int(server_info.split(":")[1]) if ":" in server_info else 443
+                else:
+                    return None # Неизвестный формат SS
+
+                outbound["protocol"] = "shadowsocks"
+                outbound["settings"] = {"servers": [{"address": host, "port": port, "method": method, "password": passwd}]}
 
             outbound["streamSettings"]["sockopt"] = {"mark": 255}
             return outbound
@@ -135,21 +183,31 @@ class XrayWrapper:
 
     @staticmethod
     def run_check(link, tid, total_count):
-        log_prefix = f"[{tid}/{total_count}]"
-        print(f"\n{log_prefix} >>> NEW CHECK START <<<")
-        print(f"{log_prefix} [BEFORE]: {link[:80]}...")
+        log_accumulator = []
+        def log(msg): log_accumulator.append(f"[{tid}/{total_count}] {msg}")
+
+        log(f">>> ПРОВЕРКА НАЧАТА <<<")
+        log(f"[ПОЛНАЯ ССЫЛКА ДО]: {link}")
         
         port = XrayWrapper.get_free_port()
         if not port: 
-            print(f"{log_prefix} ❌ Error: No available ports found.")
+            log(f"❌ Ошибка: Нет свободных портов.")
+            safe_log("\n".join(log_accumulator))
             return {"id": tid, "working": False, "reason": "No ports"}
             
         outbound = XrayWrapper.parse_link(link)
         if not outbound: 
-            print(f"{log_prefix} ❌ Error: Parsing/Wrapping failed.")
+            log(f"❌ Ошибка: Не удалось завернуть ссылку (Парсинг).")
+            safe_log("\n".join(log_accumulator))
             return {"id": tid, "working": False, "reason": "Parse error"}
 
-        print(f"{log_prefix} [WRAPPED]: Protocol: {outbound.get('protocol')}, Target: {outbound.get('settings', {}).get('vnext', [{'address': 'N/A'}])[0].get('address')}")
+        target_host = "N/A"
+        try:
+            if "vnext" in outbound["settings"]: target_host = outbound["settings"]["vnext"][0]["address"]
+            elif "servers" in outbound["settings"]: target_host = outbound["settings"]["servers"][0]["address"]
+        except: pass
+
+        log(f"[ЗАВЕРНУТО]: Протокол: {outbound.get('protocol')}, Цель: {target_host}")
         
         cfg_path = f"temp_cfg_{port}.json"
         with open(cfg_path, 'w') as f:
@@ -158,59 +216,81 @@ class XrayWrapper:
         proc = None
         result = {"id": tid, "raw": link, "working": False, "app_found": False, "ping": 0, "speed": 0.0}
         try:
-            print(f"{log_prefix} [XRAY]: Starting process on port {port}...")
+            log(f"[XRAY]: Запуск на порту {port}...")
             proc = subprocess.Popen(["xray", "-config", cfg_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            time.sleep(1.5)
+            time.sleep(2.0)
 
-            targets = get_cfg('CHECK_TARGETS', [{"url": "https://www.google.com", "marker": "google"}])
+            targets = get_cfg('CHECK_TARGETS', [{"url": "https://gemini.google.com/app?hl=ru", "marker": "app"}])
             target = random.choice(targets)
             proxies = {'http': f'socks5h://127.0.0.1:{port}', 'https': f'socks5h://127.0.0.1:{port}'}
             
-            print(f"{log_prefix} [CHECK]: Pinging {target['url']} via SOCKS5...")
+            log(f"[ЗАПРОС]: Проверка {target['url']} через SOCKS5...")
             start_t = time.time()
             try:
-                resp = requests.get(target["url"], proxies=proxies, timeout=10)
+                # Используем сессию для стабильности
+                s = requests.Session()
+                s.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"})
+                resp = s.get(target["url"], proxies=proxies, timeout=12)
                 result["ping"] = int((time.time() - start_t) * 1000)
-                print(f"{log_prefix} [RESPONSE]: Status: {resp.status_code}, Time: {result['ping']}ms")
+                log(f"[ОТВЕТ]: Статус: {resp.status_code}, Время: {result['ping']}ms")
                 
                 if resp.status_code == 200:
                     result["working"] = True
-                    if target["marker"] in resp.text.lower():
-                        print(f"{log_prefix} [MARKER]: Found '{target['marker']}' in response! (✅ WORKING + APP)")
+                    content_lower = resp.text.lower()
+                    url_lower = resp.url.lower()
+                    if target["marker"] in content_lower or target["marker"] in url_lower:
+                        log(f"[МАРКЕР]: Нашел '{target['marker']}'! (✅ WORKING + APP)")
                         result["app_found"] = True
                     else:
-                        print(f"{log_prefix} [MARKER]: Not found. (⚡ FAST ONLY)")
+                        log(f"[МАРКЕР]: Не найден. (⚡ FAST ONLY)")
+                elif resp.status_code in [403, 429]:
+                    log(f"[ОТВЕТ]: Доступ ограничен (Code {resp.status_code}). Возможно IP в бане Google.")
                 else:
-                    print(f"{log_prefix} [RESPONSE]: Failed (Code {resp.status_code}).")
+                    log(f"[ОТВЕТ]: Ошибка сервера (Code {resp.status_code}).")
             except Exception as e:
-                print(f"{log_prefix} [CHECK ERROR]: {str(e)[:50]}")
+                log(f"[ОШИБКА ЗАПРОСА]: {str(e)[:100]}")
 
             if result["working"]:
-                print(f"{log_prefix} [SPEEDTEST]: Running 1MB download test...")
+                log(f"[СКОРОСТЬ]: Запуск теста 1MB...")
                 if get_cfg('USE_LIBRESPEED', False):
                     try:
-                        args = get_cfg('LIBRESPEED_ARGS', "--json")
+                        args = get_cfg('LIBRESPEED_ARGS', "--json --bytes")
                         ls_cmd = f"librespeed-cli {args} --proxy \"socks5://127.0.0.1:{port}\""
-                        ls_proc = subprocess.run(ls_cmd, shell=True, capture_output=True, text=True, timeout=15)
+                        ls_proc = subprocess.run(ls_cmd, shell=True, capture_output=True, text=True, timeout=20)
                         if ls_proc.returncode == 0:
                             data = json.loads(ls_proc.stdout)
-                            result["speed"] = round(data.get("download", 0) / 8, 2)
-                            print(f"{log_prefix} [SPEED-LS]: {result['speed']} MB/s")
-                    except: pass
+                            # Переводим из Mbps в MB/s (если в мегабитах) или используем kbyte/s
+                            # Если --bytes, то в мегабайтах/сек
+                            val = data.get("download", 0)
+                            result["speed"] = round(val, 2)
+                            log(f"[СКОРОСТЬ-LS]: {result['speed']} MB/s")
+                        else:
+                            log(f"[СКОРОСТЬ-LS]: Ошибка выполнения. stderr: {ls_proc.stderr[:100]}")
+                    except Exception as e:
+                        log(f"[СКОРОСТЬ-LS ОШИБКА]: {str(e)}")
                 
                 if result["speed"] <= 0.0:
                     try:
+                        log(f"[СКОРОСТЬ-RAW]: Попытка скачивания чанка 1MB...")
                         s_t = time.time()
-                        r = requests.get("https://speed.hetzner.de/100MB.bin", proxies=proxies, timeout=10, stream=True)
-                        for chunk in r.iter_content(1024 * 1024):
-                            if chunk: break
+                        # Используем более гарантированный файл для теста
+                        r = requests.get("https://speed.hetzner.de/100MB.bin", proxies=proxies, timeout=12, stream=True)
+                        downloaded = 0
+                        for chunk in r.iter_content(chunk_size=1024*1024):
+                            if chunk:
+                                downloaded += len(chunk)
+                                break # Хватит 1 метра
                         dur = time.time() - s_t
-                        result["speed"] = round(1.0 / dur, 2) if dur > 0 else 0.1
-                        print(f"{log_prefix} [SPEED-RAW]: {result['speed']} MB/s")
-                    except: pass
+                        if downloaded > 0 and dur > 0:
+                            result["speed"] = round((downloaded / (1024*1024)) / dur, 2)
+                            log(f"[СКОРОСТЬ-RAW]: {result['speed']} MB/s")
+                        else:
+                            log(f"[СКОРОСТЬ-RAW]: Не удалось скачать данные.")
+                    except Exception as e:
+                        log(f"[СКОРОСТЬ-RAW ОШИБКА]: {str(e)}")
 
         except Exception as e:
-            print(f"{log_prefix} [FATAL]: {str(e)}")
+            log(f"[КРИТИЧЕСКАЯ ОШИБКА ИЗМЕРЕНИЯ]: {str(e)}")
         finally:
             if proc: 
                 try:
@@ -221,16 +301,16 @@ class XrayWrapper:
                 try: os.remove(cfg_path)
                 except: pass
         
-        final_status = "✅" if result["working"] else "❌"
-        app_tag = " [APP]" if result["app_found"] else ""
-        print(f"{log_prefix} [FINAL]: {final_status}{app_tag} Speed: {result['speed']} MB/s, Ping: {result['ping']}ms")
+        tag = "✅ WORKING+APP" if result["app_found"] else ("⚡ FAST" if result["working"] else "❌ DEAD")
+        log(f"[ИТОГ]: {tag} | Скорость: {result['speed']} MB/s, Пинг: {result['ping']}ms")
+        log(f"[ПОЛНАЯ ССЫЛКА ПОСЛЕ]: {result['raw']} | Фильтр: {'working' if result['app_found'] else 'fast' if result['working'] else 'dead'}")
+        
+        safe_log("\n".join(log_accumulator))
         return result
 
 def main():
     start_time = datetime.now()
-    print(f"\n================================================================")
-    print(f"[{start_time}] >>> EXTREME PROXY CHECKER SESSION START <<<")
-    print(f"================================================================\n")
+    safe_log(f"\n{'='*70}\n[{start_time}] СЕССИЯ ПРОВЕРКИ ПРОКСИ НАЧАТА\n{'='*70}\n")
     
     run_count_path = get_cfg('RUN_COUNT_PATH', '.run_count')
     temp_setup_path = get_cfg('TEMP_SETUP_PATH', 'temp_setup.txt')
@@ -242,53 +322,67 @@ def main():
         count += 1
     else: count = 1
     with open(run_count_path, 'w') as f: f.write(str(count))
-    
-    if count >= 2 and os.path.exists(temp_setup_path):
-        os.remove(temp_setup_path)
-        print(f"--- Cleanup: {temp_setup_path} deleted (Run #{count}) ---\n")
 
+    # Сбор подписок
     os.makedirs("subscriptions", exist_ok=True)
     all_text = ""
+    # Читаем также текущие файлы, чтобы продолжить/дополнить если нужно?
+    # Пользователь просил "не перезапускался заново а продолжал дальше"
+    # Для этого нам нужно загрузить уже проверенные ссылки и знать их статус.
+    # Но проще: загрузить базу, дедуплицировать и если ссылка уже есть в рабочем списке - можно её перепроверить или пропустить.
+    # Но так как бот удаляет мертвые, мы просто берем всё что есть в raw.txt и SUBSCRIPTION_URLS
+    
+    current_raw = []
+    if os.path.exists(get_cfg('RAW_PATH', 'subscriptions/raw.txt')):
+        with open(get_cfg('RAW_PATH', 'subscriptions/raw.txt'), 'r', encoding='utf-8') as f:
+            current_raw = f.read().splitlines()
+
     for url in get_cfg('SUBSCRIPTION_URLS', []):
         try:
-            print(f"Fetching source: {url}...")
-            r = requests.get(url, timeout=20)
+            safe_log(f"Загрузка: {url}...")
+            r = requests.get(url, timeout=25)
             all_text += r.text + "\n"
-        except: print(f"Failed to fetch content from {url}")
+        except: safe_log(f"Ошибка загрузки из {url}")
+    
+    all_text += "\n".join(current_raw)
     
     links = industrial_extractor(all_text)
     total_found = len(links)
-    print(f"\n[INFO]: Total unique links discovered: {total_found}")
+    safe_log(f"\n[ИНФО]: Всего уникальных ссылок для проверки: {total_found}\n")
     
+    # Сохраняем свежий raw.txt
     with open(get_cfg('RAW_PATH', 'subscriptions/raw.txt'), 'w', encoding='utf-8') as f:
         f.write("\n".join(links))
 
     results = []
     max_workers = get_cfg('MAX_WORKERS', 12)
-    print(f"[INFO]: Starting parallel verification using {max_workers} threads...\n")
+    safe_log(f"[ИНФОРМАЦИЯ]: Запуск {max_workers} потоков...\n")
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_link = {executor.submit(XrayWrapper.run_check, l, i+1, total_found): l for i, l in enumerate(links)}
-        
         for future in as_completed(future_to_link):
             try:
                 res = future.result()
                 results.append(res)
             except Exception as e:
-                print(f"CRITICAL THREAD ERROR: {e}")
+                safe_log(f"КРИТИЧЕСКАЯ ОШИБКА ПОТОКА: {e}")
 
-    # Sorting
+    # Сортировка и сохранение
     working, fast = [], []
     current_date = datetime.now().strftime('%d/%m %H:%M')
     for r in results:
         if not r["working"]: continue
         tag = f"ping:{r['ping']}ms spd:{r['speed']}MB/s date:{current_date}"
-        entry = f"{r['raw'].split('#')[0]}#{tag}"
+        # Очищаем оригинальную ссылку от старых тегов #...
+        base_link = r["raw"].split('#')[0]
+        entry = f"{base_link}#{tag}"
+        
         if r["app_found"] and r["speed"] >= get_cfg('MIN_SPEED_MBPS', 0.5):
             working.append(entry)
-        elif r["speed"] >= get_cfg('MIN_SPEED_FAST', 0.2):
+        elif r["speed"] >= get_cfg('MIN_SPEED_FAST', 0.1): # Немного снизил порог для fast
             fast.append(entry)
 
+    # Перезаписываем итоговые файлы (удаляя мертвые)
     with open(get_cfg('WORKING_PATH', 'subscriptions/working.txt'), 'w', encoding='utf-8') as f:
         f.write("\n".join(working))
     with open(get_cfg('FAST_PATH', 'subscriptions/fast.txt'), 'w', encoding='utf-8') as f:
@@ -296,14 +390,14 @@ def main():
     
     end_time = datetime.now()
     duration = (end_time - start_time).seconds
-    print(f"\n================================================================")
-    print(f"[{end_time}] >>> SESSION FINISHED in {duration}s <<<")
-    print(f"Total: {total_found} | Working: {len(working)} | Fast: {len(fast)} | Dead: {total_found - len(working) - len(fast)}")
-    print(f"================================================================\n")
+    safe_log(f"\n{'='*70}")
+    safe_log(f"[{end_time}] СЕССИЯ ЗАВЕРШЕНА ЗА {duration}s")
+    safe_log(f"Итог: Всего={total_found} | Working={len(working)} | Fast={len(fast)} | Dead={total_found - len(working) - len(fast)}")
+    safe_log(f"{'='*70}\n")
 
 if __name__ == "__main__":
     try: main()
     except KeyboardInterrupt: sys.exit(0)
     except Exception as e:
-        print(f"FATAL REBOOT ERROR: {e}")
+        safe_log(f"ФАТАЛЬНАЯ ОШИБКА: {e}")
         sys.exit(1)
