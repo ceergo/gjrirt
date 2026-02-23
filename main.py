@@ -142,9 +142,22 @@ def download_binaries():
     print(f"[LOG] Проверка платформы: {platform.system()} {platform.machine()}")
     # В GitHub Actions эти файлы обычно добавляются через setup-xray или curl в yml
     # Здесь мы просто проверяем их наличие.
-    if not os.path.exists(XRAY_PATH):
-        print(f"[WARNING] {XRAY_PATH} не найден. Убедитесь, что он будет в PATH или в текущей папке.")
-    if not os.path.exists(LIBRESPEED_PATH):
+    if os.path.exists(XRAY_PATH):
+        try:
+            os.chmod(XRAY_PATH, 0o755)
+            print(f"[LOG] Права на выполнение для {XRAY_PATH} установлены.")
+        except Exception as e:
+            print(f"[ERROR] Не удалось установить права для {XRAY_PATH}: {e}")
+    else:
+        print(f"[WARNING] {XRAY_PATH} не найден.")
+        
+    if os.path.exists(LIBRESPEED_PATH):
+        try:
+            os.chmod(LIBRESPEED_PATH, 0o755)
+            print(f"[LOG] Права на выполнение для {LIBRESPEED_PATH} установлены.")
+        except Exception as e:
+            print(f"[ERROR] Не удалось установить права для {LIBRESPEED_PATH}: {e}")
+    else:
         print(f"[WARNING] {LIBRESPEED_PATH} не найден.")
 class ProxyChecker:
     def __init__(self, link):
@@ -218,11 +231,16 @@ class ProxyChecker:
                 sni = params.get("sni", [""])[0]
                 fp = params.get("fp", [self.fingerprint])[0]
                 
+                # Попытка извлечь UUID / Пароль
+                user_id = parsed.username or ""
+                if not user_id and ":" in parsed.netloc:
+                    user_id = parsed.netloc.split("@")[0].split(":")[0]
+                
                 outbound = {
                     "protocol": proto,
                     "settings": {"servers": [{"address": parsed.hostname, "port": parsed.port or 443, 
-                                             "users": [{"id": parsed.username if proto=="vless" else "", 
-                                                       "password": unquote(parsed.username) if proto=="trojan" else "",
+                                             "users": [{"id": user_id if proto=="vless" else "", 
+                                                       "password": unquote(user_id) if proto=="trojan" else "",
                                                        "encryption": "none" if proto=="vless" else None}]}]},
                     "streamSettings": {
                         "network": params.get("type", ["tcp"])[0],
