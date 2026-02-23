@@ -27,6 +27,7 @@ def process_single_link(link):
             return {"link": link, "status": "dead"}
         
         # 3. Пинг и Ключевое слово (Gemini)
+        # checker.check_availability теперь работает молча и возвращает результат
         alive, has_feature, latency = checker.check_availability()
         
         if not alive:
@@ -58,6 +59,7 @@ def process_single_link(link):
         print(f"⚠️  [ERR ] {link[:50]}... | Фатально: {e}")
         return {"link": link, "status": "error"}
     finally:
+        # Остановка тоже должна быть тихой внутри checker
         checker.stop_xray()
 
 def main():
