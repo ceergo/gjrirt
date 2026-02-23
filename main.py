@@ -76,11 +76,10 @@ class XrayWrapper:
     @staticmethod
     def get_free_port():
         port_range = get_cfg('XRAY_PORT_RANGE', (12000, 20000))
-        # Пробуем 10 раз найти случайный порт
-        for _ in range(10):
+        for _ in range(15):
             port = random.randint(port_range[0], port_range[1])
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(0.5)
+                s.settimeout(0.3)
                 if s.connect_ex(('127.0.0.1', port)) != 0: return port
         return None
 
@@ -135,12 +134,23 @@ class XrayWrapper:
         except: return None
 
     @staticmethod
-    def run_check(link, tid):
+    def run_check(link, tid, total_count):
+        log_prefix = f"[{tid}/{total_count}]"
+        print(f"\n{log_prefix} >>> NEW CHECK START <<<")
+        print(f"{log_prefix} [BEFORE]: {link[:80]}...")
+        
         port = XrayWrapper.get_free_port()
-        if not port: return {"id": tid, "working": False, "reason": "No ports"}
+        if not port: 
+            print(f"{log_prefix} ❌ Error: No available ports found.")
+            return {"id": tid, "working": False, "reason": "No ports"}
+            
         outbound = XrayWrapper.parse_link(link)
-        if not outbound: return {"id": tid, "working": False, "reason": "Parse error"}
+        if not outbound: 
+            print(f"{log_prefix} ❌ Error: Parsing/Wrapping failed.")
+            return {"id": tid, "working": False, "reason": "Parse error"}
 
+        print(f"{log_prefix} [WRAPPED]: Protocol: {outbound.get('protocol')}, Target: {outbound.get('settings', {}).get('vnext', [{'address': 'N/A'}])[0].get('address')}")
+        
         cfg_path = f"temp_cfg_{port}.json"
         with open(cfg_path, 'w') as f:
             json.dump({"log": {"loglevel": "none"}, "inbounds": [{"port": port, "listen": "127.0.0.1", "protocol": "socks"}], "outbounds": [outbound]}, f)
@@ -148,26 +158,35 @@ class XrayWrapper:
         proc = None
         result = {"id": tid, "raw": link, "working": False, "app_found": False, "ping": 0, "speed": 0.0}
         try:
-            # Запускаем xray
+            print(f"{log_prefix} [XRAY]: Starting process on port {port}...")
             proc = subprocess.Popen(["xray", "-config", cfg_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            time.sleep(1.5) # Немного меньше пауза
+            time.sleep(1.5)
 
             targets = get_cfg('CHECK_TARGETS', [{"url": "https://www.google.com", "marker": "google"}])
             target = random.choice(targets)
             proxies = {'http': f'socks5h://127.0.0.1:{port}', 'https': f'socks5h://127.0.0.1:{port}'}
             
+            print(f"{log_prefix} [CHECK]: Pinging {target['url']} via SOCKS5...")
             start_t = time.time()
             try:
-                # Первый быстрый чек
-                resp = requests.get(target["url"], proxies=proxies, timeout=8)
+                resp = requests.get(target["url"], proxies=proxies, timeout=10)
                 result["ping"] = int((time.time() - start_t) * 1000)
+                print(f"{log_prefix} [RESPONSE]: Status: {resp.status_code}, Time: {result['ping']}ms")
+                
                 if resp.status_code == 200:
                     result["working"] = True
-                    if target["marker"] in resp.text.lower(): result["app_found"] = True
-            except: pass
+                    if target["marker"] in resp.text.lower():
+                        print(f"{log_prefix} [MARKER]: Found '{target['marker']}' in response! (✅ WORKING + APP)")
+                        result["app_found"] = True
+                    else:
+                        print(f"{log_prefix} [MARKER]: Not found. (⚡ FAST ONLY)")
+                else:
+                    print(f"{log_prefix} [RESPONSE]: Failed (Code {resp.status_code}).")
+            except Exception as e:
+                print(f"{log_prefix} [CHECK ERROR]: {str(e)[:50]}")
 
             if result["working"]:
-                # ТЕСТ СКОРОСТИ
+                print(f"{log_prefix} [SPEEDTEST]: Running 1MB download test...")
                 if get_cfg('USE_LIBRESPEED', False):
                     try:
                         args = get_cfg('LIBRESPEED_ARGS', "--json")
@@ -176,9 +195,9 @@ class XrayWrapper:
                         if ls_proc.returncode == 0:
                             data = json.loads(ls_proc.stdout)
                             result["speed"] = round(data.get("download", 0) / 8, 2)
+                            print(f"{log_prefix} [SPEED-LS]: {result['speed']} MB/s")
                     except: pass
                 
-                # Резервный метод скачивания 1MB
                 if result["speed"] <= 0.0:
                     try:
                         s_t = time.time()
@@ -187,25 +206,32 @@ class XrayWrapper:
                             if chunk: break
                         dur = time.time() - s_t
                         result["speed"] = round(1.0 / dur, 2) if dur > 0 else 0.1
+                        print(f"{log_prefix} [SPEED-RAW]: {result['speed']} MB/s")
                     except: pass
 
-        except Exception as e: pass
+        except Exception as e:
+            print(f"{log_prefix} [FATAL]: {str(e)}")
         finally:
             if proc: 
                 try:
-                    proc.kill() # Более агрессивное завершение
+                    proc.kill()
                     proc.wait(timeout=1)
                 except: pass
             if os.path.exists(cfg_path): 
                 try: os.remove(cfg_path)
                 except: pass
+        
+        final_status = "✅" if result["working"] else "❌"
+        app_tag = " [APP]" if result["app_found"] else ""
+        print(f"{log_prefix} [FINAL]: {final_status}{app_tag} Speed: {result['speed']} MB/s, Ping: {result['ping']}ms")
         return result
 
 def main():
     start_time = datetime.now()
-    print(f"[{start_time}] >>> BOT START <<<")
+    print(f"\n================================================================")
+    print(f"[{start_time}] >>> EXTREME PROXY CHECKER SESSION START <<<")
+    print(f"================================================================\n")
     
-    # Run count logic
     run_count_path = get_cfg('RUN_COUNT_PATH', '.run_count')
     temp_setup_path = get_cfg('TEMP_SETUP_PATH', 'temp_setup.txt')
 
@@ -219,39 +245,37 @@ def main():
     
     if count >= 2 and os.path.exists(temp_setup_path):
         os.remove(temp_setup_path)
-        print(f"Cleanup: {temp_setup_path} deleted.")
+        print(f"--- Cleanup: {temp_setup_path} deleted (Run #{count}) ---\n")
 
-    # Fetch
     os.makedirs("subscriptions", exist_ok=True)
     all_text = ""
     for url in get_cfg('SUBSCRIPTION_URLS', []):
         try:
-            r = requests.get(url, timeout=15)
+            print(f"Fetching source: {url}...")
+            r = requests.get(url, timeout=20)
             all_text += r.text + "\n"
-        except: pass
+        except: print(f"Failed to fetch content from {url}")
     
     links = industrial_extractor(all_text)
-    print(f"Total Unique Proxies: {len(links)}")
+    total_found = len(links)
+    print(f"\n[INFO]: Total unique links discovered: {total_found}")
+    
     with open(get_cfg('RAW_PATH', 'subscriptions/raw.txt'), 'w', encoding='utf-8') as f:
         f.write("\n".join(links))
 
-    # Parallel Execution с использованием as_completed для прогресса
     results = []
-    max_workers = get_cfg('MAX_WORKERS', 8)
-    print(f"Checking with {max_workers} threads...")
+    max_workers = get_cfg('MAX_WORKERS', 12)
+    print(f"[INFO]: Starting parallel verification using {max_workers} threads...\n")
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_link = {executor.submit(XrayWrapper.run_check, l, i): l for i, l in enumerate(links)}
+        future_to_link = {executor.submit(XrayWrapper.run_check, l, i+1, total_found): l for i, l in enumerate(links)}
         
         for future in as_completed(future_to_link):
             try:
                 res = future.result()
                 results.append(res)
-                status = "✅" if res["working"] else "❌"
-                m = " [APP]" if res["app_found"] else ""
-                print(f"[{res['id']}/{len(links)}] {status}{m} ping:{res['ping']} spd:{res['speed']} MB/s | {res['raw'][:40]}...")
             except Exception as e:
-                print(f"Error in thread: {e}")
+                print(f"CRITICAL THREAD ERROR: {e}")
 
     # Sorting
     working, fast = [], []
@@ -272,11 +296,14 @@ def main():
     
     end_time = datetime.now()
     duration = (end_time - start_time).seconds
-    print(f"\nFINISHED in {duration}s. Working: {len(working)}, Fast: {len(fast)}")
+    print(f"\n================================================================")
+    print(f"[{end_time}] >>> SESSION FINISHED in {duration}s <<<")
+    print(f"Total: {total_found} | Working: {len(working)} | Fast: {len(fast)} | Dead: {total_found - len(working) - len(fast)}")
+    print(f"================================================================\n")
 
 if __name__ == "__main__":
     try: main()
     except KeyboardInterrupt: sys.exit(0)
     except Exception as e:
-        print(f"CRITICAL ERROR: {e}")
+        print(f"FATAL REBOOT ERROR: {e}")
         sys.exit(1)
