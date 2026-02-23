@@ -83,7 +83,6 @@ def fetch_remote_subscriptions() -> str:
 def clean_link(link):
     """
     Очищает ссылку: корректно обрабатывает хэштеги и склеенные ссылки.
-    Теперь хэштег удаляется только если он является метаданными (именем прокси).
     """
     link = link.strip()
     if not link:
@@ -93,15 +92,35 @@ def clean_link(link):
     pattern_proto = r'(?i)(' + '|'.join(PROTOCOLS) + r')://'
     matches = list(re.finditer(pattern_proto, link))
     if len(matches) > 1:
-        # Если найдено более одного протокола, обрезаем до начала второго
         link = link[:matches[1].start()]
 
-    # 2. Обработка хэштега. В прокси-ссылках хэштег — это всегда имя в самом конце.
+    # 2. Обработка хэштега. В прокси-ссылках хэштег — это имя в конце.
     if "#" in link:
-        # Режем по первому хэштегу, который идет после базовой структуры URL
         link = link.split("#")[0]
     
     return link.strip()
+
+def validate_link_structure(link):
+    """Подробная проверка структуры ссылки перед обработкой."""
+    if not link: return False, "Empty link"
+    
+    try:
+        parsed = urlparse(link)
+        if not parsed.scheme:
+            return False, "Missing protocol scheme"
+        if parsed.scheme.lower() not in PROTOCOLS:
+            return False, f"Unsupported protocol: {parsed.scheme}"
+        
+        # Для VMESS своя логика (Base64)
+        if parsed.scheme.lower() == "vmess":
+            return True, "VMESS (Base64)"
+            
+        if not parsed.hostname and "@" not in link:
+            return False, "Malformed address (no hostname/userinfo)"
+            
+        return True, "Structure OK"
+    except Exception as e:
+        return False, f"URL Parse Error: {str(e)}"
 
 def parse_subscriptions(content: str) -> list[str]:
     """
@@ -128,6 +147,7 @@ def parse_subscriptions(content: str) -> list[str]:
             return
 
         try:
+            # Пытаемся декодировать Base64 если нет протоколов в явном виде
             b64_candidate = re.sub(r'[^a-zA-Z0-9+/=]', '', text)
             if len(b64_candidate) > 10:
                 padding = len(b64_candidate) % 4
@@ -147,11 +167,10 @@ def parse_subscriptions(content: str) -> list[str]:
 
 def get_free_port():
     """Находит свободный порт в системе для запуска Xray."""
-    for _ in range(10): # 10 попыток найти порт
+    for _ in range(10):
         port = random.randint(20000, 60000)
         if not check_port_in_use(port):
             return port
-    # Если рандом не помог, используем системный метод
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(('', 0))
         return s.getsockname()[1]
@@ -161,7 +180,6 @@ def setup_binaries():
     xray_path, librespeed_path = get_actual_paths()
     print(f"[LOG] Платформа: {platform.system()} {platform.machine()} (Node: {platform.node()})")
     
-    # Проверка Xray
     if not os.path.exists(xray_path):
         print(f"[CRITICAL] Xray НЕ найден по пути: {xray_path}. Тестирование невозможно.")
     else:
@@ -169,13 +187,11 @@ def setup_binaries():
             print(f"[LOG] Установка прав исполнения для Xray...")
             os.chmod(xray_path, 0o755)
         
-        # Проверка наличия Geo-баз (необходимы для некоторых конфигов)
         base_dir = os.path.dirname(xray_path)
         for geo_file in ["geoip.dat", "geosite.dat"]:
             if not os.path.exists(os.path.join(base_dir, geo_file)):
                 print(f"[WARNING] Файл {geo_file} не найден в {base_dir}. Некоторые конфиги могут не работать.")
 
-    # Проверка Librespeed
     if os.path.exists(librespeed_path):
         if not os.access(librespeed_path, os.X_OK):
             os.chmod(librespeed_path, 0o755)
@@ -204,8 +220,14 @@ class ProxyChecker:
     def generate_xray_config(self):
         """Формирует JSON конфиг для Xray на основе прокси-ссылки."""
         try:
+            # Дополнительная валидация перед парсингом
+            is_valid, msg = validate_link_structure(self.link)
+            if not is_valid:
+                self.error_log = f"Invalid Link: {msg}"
+                return None
+
             config = {
-                "log": {"loglevel": "warning"}, # Увеличиваем лог для отлова ошибок
+                "log": {"loglevel": "warning"},
                 "inbounds": [{
                     "port": self.port,
                     "listen": "127.0.0.1",
@@ -223,7 +245,9 @@ class ProxyChecker:
             
             if "vmess://" in link_lower:
                 v_data = self._parse_vmess(self.link)
-                if not v_data: return None
+                if not v_data: 
+                    self.error_log = "VMESS: Base64 decoding failed"
+                    return None
                 outbound = {
                     "protocol": "vmess",
                     "settings": {"vnext": [{"address": v_data.get("add"), "port": int(v_data.get("port")), 
@@ -305,7 +329,7 @@ class ProxyChecker:
             config["outbounds"] = [outbound, {"protocol": "freedom", "tag": "direct"}]
             return config
         except Exception as e:
-            self.error_log = f"Config Error: {str(e)}"
+            self.error_log = f"Config Generation Failed: {str(e)}"
             return None
 
     def start_xray(self):
@@ -318,7 +342,6 @@ class ProxyChecker:
             json.dump(config, f)
             
         try:
-            # Запускаем и перехватываем stderr для анализа причин падения
             self.process = subprocess.Popen(
                 [self.xray_bin, "-c", config_path],
                 stdout=subprocess.PIPE,
@@ -327,18 +350,17 @@ class ProxyChecker:
                 env={**os.environ, "XRAY_LOCATION_ASSET": os.path.dirname(self.xray_bin)}
             )
             
-            # Ждем немного и проверяем, не упал ли процесс сразу
             time.sleep(XRAY_STARTUP_DELAY) 
             
             if self.process.poll() is not None:
-                # Если процесс завершился, читаем ошибку
                 err_out = self.process.stderr.read()
-                self.error_log = f"Xray Exit ({self.process.returncode}): {err_out.strip()}"
+                # Подробно описываем причину падения
+                self.error_log = f"Core Crash ({self.process.returncode}): {err_out.strip()[:150]}"
                 self.stop_xray()
                 return False
             return True
         except Exception as e:
-            self.error_log = f"Spawn Error: {str(e)}"
+            self.error_log = f"OS Execution Error: {str(e)}"
             return False
 
     def stop_xray(self):
@@ -364,7 +386,7 @@ class ProxyChecker:
             if resp.status_code == 200:
                 return True, DISTINCTIVE_FEATURE.lower() in resp.text.lower(), duration
         except Exception as e:
-            self.error_log = f"HTTP Error: {str(e)}"
+            self.error_log = f"HTTP Proxy Error: {str(e)}"
         return False, False, 0
 
     def check_speed(self):
@@ -379,10 +401,14 @@ class ProxyChecker:
         return 0
 
 def process_single_link(link):
+    """Обертка для тестирования одной ссылки с полным логированием."""
     checker = ProxyChecker(link)
     try:
+        # Проверка структуры перед стартом
         if not checker.start_xray():
-            print(f"[DEAD] {link[:40]}... | {checker.error_log}")
+            # Если не запустился, выводим причину и саму ссылку (первые 60 символов)
+            short_link = link if len(link) < 60 else link[:57] + "..."
+            print(f"[DEAD] {short_link} | Reason: {checker.error_log}")
             return {"link": link, "status": "dead"}
         
         alive, has_app, latency = checker.check_availability()
@@ -392,9 +418,12 @@ def process_single_link(link):
                 status = "working_app" if has_app else "working_fast"
                 print(f"[LIVE] {link[:40]}... | {'APP' if has_app else 'FAST'} | {latency*1000:.0f}ms | {speed:.2f}Mbps")
                 return {"link": link, "status": status}
+        else:
+            print(f"[FAIL] {link[:40]}... | No connection | Log: {checker.error_log}")
         
         return {"link": link, "status": "dead"}
     except Exception as e:
+        print(f"[ERROR] Logic exception: {str(e)}")
         return {"link": link, "status": "error"}
     finally:
         checker.stop_xray()
@@ -448,4 +477,4 @@ def main():
 if __name__ == "__main__":
     try: main()
     except KeyboardInterrupt: print("\n[EXIT] Остановлено пользователем.")
-    except Exception as e: print(f"[CRITICAL] Ошибка: {e}")
+    except Exception as e: print(f"[CRITICAL] Ошибка в главном цикле: {e}")
