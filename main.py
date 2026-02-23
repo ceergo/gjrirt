@@ -72,18 +72,26 @@ def fetch_remote_subscriptions() -> str:
 
 def clean_link(link):
     """
-    Очищает ссылку: удаляет ВСЁ начиная с символа # (включительно) 
-    и обрезает до начала следующего протокола, если они склеены.
+    Очищает ссылку: корректно обрабатывает хэштеги и склеенные ссылки.
+    Теперь хэштег удаляется только если он является метаданными (именем прокси).
     """
-    if "#" in link:
-        link = link.split("#")[0]
-    
     link = link.strip()
-    
-    pattern = r'(?i)(' + '|'.join(PROTOCOLS) + r')://'
-    matches = list(re.finditer(pattern, link))
+    if not link:
+        return ""
+
+    # 1. Сначала проверяем, не склеены ли ссылки (протокол внутри строки)
+    pattern_proto = r'(?i)(' + '|'.join(PROTOCOLS) + r')://'
+    matches = list(re.finditer(pattern_proto, link))
     if len(matches) > 1:
+        # Если найдено более одного протокола, обрезаем до начала второго
         link = link[:matches[1].start()]
+
+    # 2. Обработка хэштега. В прокси-ссылках хэштег — это всегда имя в самом конце.
+    # Мы ищем ПОСЛЕДНИЙ хэштег, чтобы не сломать параметры внутри URL (хотя это редкость)
+    if "#" in link:
+        # Проверяем, не является ли хэштег частью параметров (до знака ?)
+        # В корректных URL хэштег всегда идет после всех параметров.
+        link = link.split("#")[0]
     
     return link.strip()
 
@@ -99,6 +107,8 @@ def parse_subscriptions(content: str) -> list[str]:
         text = text.strip()
         if not text:
             return
+        
+        # Ищем все вхождения протоколов
         starts = [m.start() for m in re.finditer(pattern_proto, text)]
         if starts:
             for i in range(len(starts)):
@@ -113,38 +123,43 @@ def parse_subscriptions(content: str) -> list[str]:
                 if cleaned:
                     found_links.append(cleaned)
             return
+
+        # Если протоколов нет, пробуем декодировать как Base64
         try:
-            # Пытаемся декодировать как Base64 если нет протоколов
-            b64_data = re.sub(r'[^a-zA-Z0-9+/=]', '', text)
-            if len(b64_data) > 10:
-                missing_padding = len(b64_data) % 4
-                if missing_padding:
-                    b64_data += '=' * (4 - missing_padding)
+            # Убираем лишние символы для Base64
+            b64_candidate = re.sub(r'[^a-zA-Z0-9+/=]', '', text)
+            if len(b64_candidate) > 10:
+                padding = len(b64_candidate) % 4
+                if padding:
+                    b64_candidate += '=' * (4 - padding)
                 
-                decoded_bytes = base64.b64decode(b64_data)
+                decoded_bytes = base64.b64decode(b64_candidate)
                 decoded_str = decoded_bytes.decode('utf-8', errors='ignore')
                 
+                # Если внутри декодированного текста есть протоколы — обрабатываем рекурсивно
                 if re.search(pattern_proto, decoded_str):
                     for line in decoded_str.splitlines():
                         process_text(line)
         except:
             pass
 
+    # Первичное разбиение по пробельным символам
     chunks = content.split()
     for c in chunks:
         process_text(c)
     
+    # Удаляем дубликаты и пустые строки
     final_links = sorted(list(set(filter(None, found_links))))
     return final_links
 
 def get_free_port():
-    """Находит свободный порт в системе."""
+    """Находит свободный порт в системе для запуска Xray."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(('', 0))
         return s.getsockname()[1]
 
 def setup_binaries():
-    """Проверка наличия файлов xray и librespeed."""
+    """Проверка наличия и прав доступа для исполняемых файлов."""
     xray_path, librespeed_path = get_actual_paths()
     print(f"[LOG] Проверка платформы: {platform.system()} {platform.machine()}")
     
@@ -161,6 +176,7 @@ def setup_binaries():
         print(f"[WARNING] Librespeed НЕ найден: {librespeed_path}")
 
 class ProxyChecker:
+    """Класс для управления процессом Xray и выполнения тестов."""
     def __init__(self, link):
         self.link = link
         self.port = get_free_port()
@@ -169,12 +185,13 @@ class ProxyChecker:
         self.xray_bin, self.librespeed_bin = get_actual_paths()
         
     def _parse_vmess(self, link):
+        """Парсинг специфического формата vmess:// (Base64 JSON)."""
         try:
             data = link.replace("vmess://", "").strip()
             data = re.sub(r'[^a-zA-Z0-9+/=]', '', data)
-            missing_padding = len(data) % 4
-            if missing_padding:
-                data += '=' * (4 - missing_padding)
+            padding = len(data) % 4
+            if padding:
+                data += '=' * (4 - padding)
             
             decoded = base64.b64decode(data).decode('utf-8')
             return json.loads(decoded)
@@ -182,6 +199,7 @@ class ProxyChecker:
             return None
 
     def generate_xray_config(self):
+        """Формирует JSON конфиг для Xray на основе прокси-ссылки."""
         try:
             config = {
                 "log": {"loglevel": "none"},
@@ -192,12 +210,13 @@ class ProxyChecker:
                 }],
                 "outbounds": []
             }
-            outbound = {"protocol": "vless", "settings": {}, "streamSettings": {}}
             
             self.fingerprint = random.choice(UTLS_FINGERPRINTS)
             if self.fingerprint == "randomized": self.fingerprint = "chrome"
             
             link_lower = self.link.lower()
+            outbound = {"protocol": "freedom", "settings": {}} # Default fallback
+            
             if "vmess://" in link_lower:
                 v_data = self._parse_vmess(self.link)
                 if not v_data: return None
@@ -248,29 +267,29 @@ class ProxyChecker:
                 }
             elif "ss://" in link_lower:
                 parsed = urlparse(self.link)
-                # Поддержка SIP002
+                # Поддержка SIP002 (Base64 в userinfo)
                 if parsed.username:
-                    user_info = parsed.username
-                    method, password = "", ""
                     try:
+                        user_info = parsed.username
                         decoded = base64.b64decode(user_info + "==").decode('utf-8', errors='ignore')
                         if ":" in decoded:
                             method, password = decoded.split(":", 1)
-                    except: pass
+                        else: return None
+                    except: return None
                     host = parsed.hostname
                     port = parsed.port or 8388
                 else:
-                    # Старый формат Base64 всего блока
+                    # Старый формат (Base64 всего после ss://)
                     try:
                         b64_part = self.link.split("://")[-1].split("#")[0]
                         decoded_full = base64.b64decode(b64_part + "==").decode('utf-8', errors='ignore')
                         if "@" in decoded_full:
-                            user_pass_part, host_port_part = decoded_full.split("@", 1)
-                            method, password = user_pass_part.split(":", 1)
-                            if ":" in host_port_part:
-                                host, port = host_port_part.split(":", 1)
+                            user_pass, host_port = decoded_full.split("@", 1)
+                            method, password = user_pass.split(":", 1)
+                            if ":" in host_port:
+                                host, port = host_port.split(":", 1)
                                 port = int(port.split("/")[0])
-                            else: host, port = host_port_part, 8388
+                            else: host, port = host_port, 8388
                         else: return None
                     except: return None
                 
@@ -291,13 +310,14 @@ class ProxyChecker:
             
             config["outbounds"] = [outbound, {"protocol": "freedom", "tag": "direct"}]
             return config
-        except:
+        except Exception as e:
+            print(f"[DEBUG] Ошибка генерации конфига: {e}")
             return None
 
     def start_xray(self):
+        """Запускает бинарный файл Xray с временным конфигом."""
         config = self.generate_xray_config()
         if not config: 
-            print(f"[DEBUG] Не удалось сгенерировать конфиг для порта {self.port}")
             return False
         
         config_path = f"config_{self.port}.json"
@@ -314,16 +334,14 @@ class ProxyChecker:
             time.sleep(XRAY_STARTUP_DELAY) 
             
             if self.process.poll() is not None:
-                err = self.process.stderr.read()
-                print(f"[DEBUG] Xray упал на порту {self.port}: {err.strip()}")
                 self.stop_xray()
                 return False
             return True
-        except Exception as e:
-            print(f"[DEBUG] Ошибка при запуске Xray: {e}")
+        except:
             return False
 
     def stop_xray(self):
+        """Останавливает процесс и удаляет временные файлы."""
         if self.process is not None:
             try:
                 self.process.terminate()
@@ -338,6 +356,7 @@ class ProxyChecker:
             except: pass
 
     def check_availability(self):
+        """Проверка пинга и наличия ключевого слова на странице."""
         proxies = {
             'http': f'socks5h://127.0.0.1:{self.port}',
             'https': f'socks5h://127.0.0.1:{self.port}'
@@ -351,14 +370,14 @@ class ProxyChecker:
                 content_lower = resp.text.lower()
                 has_feature = DISTINCTIVE_FEATURE.lower() in content_lower
                 return True, has_feature, duration
-        except Exception as e:
-            # print(f"[DEBUG] Ошибка запроса через {self.port}: {e}")
+        except:
             pass
         return False, False, 0
 
     def check_speed(self):
+        """Замер скорости через librespeed-cli."""
         if not os.path.exists(self.librespeed_bin):
-            return 1.0 # Заглушка, если нет тестера
+            return 1.0 # Если тестера нет, считаем скорость допустимой
             
         cmd = [
             self.librespeed_bin,
@@ -369,6 +388,7 @@ class ProxyChecker:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=DOWNLOAD_TIMEOUT)
             if result.returncode == 0:
                 data = json.loads(result.stdout)
+                # Конвертация bps -> Mbps
                 download = data.get("download", 0) / 125000 
                 if download >= MIN_SPEED_MBPS:
                     return download
@@ -376,10 +396,11 @@ class ProxyChecker:
         return 0
 
 def process_single_link(link):
+    """Рабочий цикл для одного потока: запуск, проверка, результат."""
     checker = ProxyChecker(link)
     try:
         if not checker.start_xray():
-            print(f"[LIVE] {link} | Xray Error")
+            print(f"[LIVE] {link} | Xray Start Failed")
             return {"link": link, "status": "dead"}
         
         alive, has_app, latency = checker.check_availability()
@@ -388,22 +409,23 @@ def process_single_link(link):
             speed = checker.check_speed()
             if speed > 0:
                 status = "working_app" if has_app else "working_fast"
-                category_name = "APP" if has_app else "FAST"
-                print(f"[LIVE] {link} | {category_name} | Ping: {latency*1000:.0f}ms | Speed: {speed:.2f} Mbps")
+                category = "APP" if has_app else "FAST"
+                print(f"[LIVE] {link} | {category} | Latency: {latency*1000:.0f}ms | Speed: {speed:.2f} Mbps")
                 return {"link": link, "status": status}
             else:
-                print(f"[LIVE] {link} | Low Speed | Ping: {latency*1000:.0f}ms")
+                print(f"[LIVE] {link} | Low Speed | Latency: {latency*1000:.0f}ms")
         else:
             print(f"[LIVE] {link} | Dead (No response)")
         
         return {"link": link, "status": "dead"}
     except Exception as e:
-        print(f"[LIVE] {link} | Exception: {e}")
+        print(f"[LIVE] {link} | Error: {e}")
         return {"link": link, "status": "error"}
     finally:
         checker.stop_xray()
 
 def update_file(filename, new_links):
+    """Обновляет файл, сохраняя уникальность ссылок."""
     existing = []
     if os.path.exists(filename):
         with open(filename, "r", encoding="utf-8") as f:
@@ -413,25 +435,30 @@ def update_file(filename, new_links):
         f.write("\n".join(updated) + "\n")
 
 def main():
+    """Основная функция управления ботом."""
     print(f"[LOG] Бот запущен: {datetime.now()}")
     setup_binaries()
     
+    # 1. Сбор данных
     remote_content = fetch_remote_subscriptions()
     local_content = ""
     if os.path.exists(RAW_SUBSCRIPTION_FILE):
         with open(RAW_SUBSCRIPTION_FILE, "r", encoding="utf-8") as f:
             local_content = f.read()
             
+    # 2. Парсинг
     total_content = remote_content + "\n" + local_content
     all_links = parse_subscriptions(total_content)
-    print(f"[LOG] Всего уникальных ссылок: {len(all_links)}")
+    print(f"[LOG] Уникальных ссылок для проверки: {len(all_links)}")
     
+    # Сохраняем все найденное для истории
     update_file(OUR_SUBSCRIPTION, all_links)
     
     results_app = []
     results_fast = []
     working_links = []
     
+    # 3. Многопоточная проверка
     count_finished = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_link = {executor.submit(process_single_link, link): link for link in all_links}
@@ -447,23 +474,25 @@ def main():
                         if status == "working_app": results_app.append(link)
                         else: results_fast.append(link)
                 
+                # Промежуточная статистика
                 if count_finished % 5 == 0 or count_finished == len(all_links):
-                    print(f"[STATS] Прогресс: {count_finished}/{len(all_links)} | Найдено: {len(working_links)}")
+                    print(f"[STATS] Прогресс: {count_finished}/{len(all_links)} | Найдено рабочих: {len(working_links)}")
             except: pass
 
+    # 4. Сохранение результатов
     update_file(WORKING_APP, results_app)
     update_file(WORKING_FAST, results_fast)
     
-    # Обновляем основные файлы только живыми ссылками
+    # Очищаем основной файл, оставляя только живые
     with open(RAW_SUBSCRIPTION_FILE, "w", encoding="utf-8") as f:
         f.write("\n".join(working_links) + "\n")
     
-    print(f"[LOG] Завершено. Живых: {len(working_links)} (APP: {len(results_app)}, FAST: {len(results_fast)})")
+    print(f"[LOG] Завершено. Итог: APP ({len(results_app)}), FAST ({len(results_fast)}).")
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n[LOG] Остановлено пользователем.")
+        print("\n[LOG] Принудительная остановка.")
     except Exception as e:
-        print(f"[CRITICAL] Ошибка: {e}")
+        print(f"[CRITICAL] Необработанная ошибка: {e}")
