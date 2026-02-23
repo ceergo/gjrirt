@@ -10,6 +10,7 @@ on:
 jobs:
   check-proxies:
     runs-on: ubuntu-latest
+    timeout-minutes: 60  
     permissions:
       contents: write
 
@@ -34,16 +35,13 @@ jobs:
 
       - name: Run Proxy Checker
         run: |
-          # Create folders if not exists
-          mkdir -p subscriptions
+          # Файлы теперь в корне
           python main.py
 
       - name: Commit and Push Results
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add subscriptions/*.txt checker.log .run_count
-          # Don't fail if there's nothing to commit
+          git add raw.txt working.txt fast.txt checker.log .run_count 2>/dev/null || true
           git commit -m "chore: update working proxies [skip ci]" || echo "No changes to commit"
           git push
-
