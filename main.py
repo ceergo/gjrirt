@@ -344,21 +344,16 @@ class ProxyChecker:
             
         try:
             xray_bin = os.getenv("XRAY_PATH", XRAY_PATH)
-            # Запускаем и ловим stderr на случай быстрой смерти
+            # Упрощенный запуск без захвата stderr во избежание конфликтов
             self.process = subprocess.Popen(
                 [xray_bin, "-c", config_path],
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE, # Слушаем ошибки
-                text=True
+                stderr=subprocess.DEVNULL
             )
             
             # Ждем и проверяем статус
-            time.sleep(2.0) 
+            time.sleep(1.0) 
             if self.process.poll() is not None:
-                # Процесс упал, выводим почему
-                error_output = self.process.stderr.read()
-                if error_output:
-                    print(f"[XRAY_ERROR] Port {self.port} failed: {error_output.strip()}")
                 self.stop_xray()
                 return False
                 
