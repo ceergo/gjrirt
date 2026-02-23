@@ -149,10 +149,18 @@ class ProxyChecker:
     def _parse_vmess(self, link):
         """Парсинг vmess:// links (Base64 JSON)"""
         try:
-            data = link.replace("vmess://", "")
+            data = link.replace("vmess://", "").strip()
+            # Очищаем от мусора и исправляем паддинг
+            data = re.sub(r'[^a-zA-Z0-9+/=]', '', data)
+            missing_padding = len(data) % 4
+            if missing_padding:
+                data += '=' * (4 - missing_padding)
+            
             decoded = base64.b64decode(data).decode('utf-8')
             return json.loads(decoded)
-        except: return None
+        except Exception as e:
+            # print(f"[DEBUG] VMESS parse error: {e}")
+            return None
     def generate_xray_config(self):
         """
         Генерирует конфиг для Xray. 
@@ -195,7 +203,35 @@ class ProxyChecker:
                 }
             elif "vless://" in link_lower or "trojan://" in link_lower:
                 parsed = urlparse(self.link)
+                params = parse_qs(parsed.query)
                 proto = "vless" if "vless://" in link_lower else "trojan"
+                
+                # Базовые настройки безопасности
+                security = params.get("security", ["none"])[0]
+                sni = params.get("sni", [""])[0]
+                fp = params.get("fp", [self.fingerprint])[0]
+                
+                outbound = {
+                    "protocol": proto,
+                    "settings": {"servers": [{"address": parsed.hostname, "port": parsed.port or 443, 
+                                             "users": [{"id": parsed.username if proto=="vless" else "", 
+                                                       "password": unquote(parsed.username) if proto=="trojan" else "",
+                                                       "encryption": "none" if proto=="vless" else None}]}]},
+                    "streamSettings": {
+                        "network": params.get("type", ["tcp"])[0],
+                        "security": security,
+                        "tlsSettings": {"serverName": sni, "fingerprint": fp} if security == "tls" else {},
+                        "realitySettings": {
+                            "serverName": sni,
+                            "fingerprint": fp,
+                            "publicKey": params.get("pbk", [""])[0],
+                            "shortId": params.get("sid", [""])[0],
+                            "spiderX": params.get("spx", [""])[0]
+                        } if security == "reality" else {},
+                        "wsSettings": {"path": params.get("path", ["/"])[0], "headers": {"Host": sni}} if params.get("type") == ["ws"] else {},
+                        "grpcSettings": {"serviceName": params.get("serviceName", [""])[0]} if params.get("type") == ["grpc"] else {}
+                    }
+                }
             # Shadowsocks
             elif "ss://" in link_lower:
                 parsed = urlparse(self.link)
@@ -245,13 +281,20 @@ class ProxyChecker:
             
         try:
             xray_bin = os.getenv("XRAY_PATH", XRAY_PATH)
-            # Используем shell=True только если xray не в PATH
+            # Пытаемся запустить
             self.process = subprocess.Popen(
                 [xray_bin, "-c", config_path],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
-            time.sleep(1.5) # Ждем инициализации
+            
+            # Ждем и проверяем, не упал ли он сразу
+            time.sleep(2.0) 
+            if self.process is None or self.process.poll() is not None:
+                # Процесс не запустился или упал
+                self.stop_xray()
+                return False
+                
             return True
         except Exception as e:
             print(f"[ERROR] Не удалось запустить Xray ({xray_bin}): {e}")
